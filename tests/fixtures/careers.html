@@ -1,0 +1,12 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Карьера в Тополь (фикстура)</title></head><body>
+<nav><a href="/careers/about-us">О компании</a> <a href="/careers/benefits">Бонусы и льготы</a></nav>
+<div id="app"></div>
+<script>
+  // Имитация SPA: список рисуется скриптом после загрузки.
+  setTimeout(() => {
+    document.getElementById('app').innerHTML = `
+      <div class="job"><h3>Backend-разработчик Python</h3><a href="/careers/jobs/backend-python-501">Подробнее</a><span>Москва · гибрид</span></div>
+      <div class="job"><h3>Data Engineer</h3><a href="/careers/jobs/data-engineer-502">Подробнее</a><span>Удалённо</span></div>`;
+  }, 800);
+</script>
+</body></html>

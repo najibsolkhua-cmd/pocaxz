@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>Job Radar</title>
+  <link rel="stylesheet" href="ui.css">
+</head>
+<body class="popup">
+  <header class="popup-head">
+    <strong>Job Radar</strong>
+    <span id="state" class="muted"></span>
+  </header>
+
+  <section class="stack">
+    <button id="collect" class="primary">Собрать вакансии с этой вкладки</button>
+    <button id="addSource">Добавить страницу в источники</button>
+    <button id="runAll">Обойти все источники сейчас</button>
+    <button id="openCrm">Открыть CRM</button>
+  </section>
+
+  <p id="msg" class="msg" hidden></p>
+
+  <footer class="muted small">
+    Совет: откройте нужный поиск на hh.ru или Avito с фильтрами, нажмите
+    «Добавить страницу в источники» — дальше расширение будет проверять его само.
+  </footer>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

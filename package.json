@@ -1,0 +1,9 @@
+{
+  "name": "job-radar",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/unit/*.test.js",
+    "test:e2e": "xvfb-run -a node tests/e2e/run.mjs"
+  }
+}
