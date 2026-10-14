@@ -8,7 +8,8 @@
 const TBANK = {
   id: 'tbank',
   match: (u) => /(^|\.)(tbank|tinkoff)\.ru$/i.test(u.hostname) && /career|vacanc/i.test(u.pathname),
-  endpoint: (u) => `${u.origin}/pfpjobs/papi/getVacancies`,
+  // Внутренние запросы сайта идут с ?appName=pfpjobs&origin=web,ib5,platform — пробуем и так.
+  endpoints: (u) => [`${u.origin}/pfpjobs/papi/getVacancies`, `${u.origin}/pfpjobs/papi/getVacancies?appName=pfpjobs&origin=web%2Cib5%2Cplatform`],
   bodies: [
     { limit: 300, offset: 0, filters: { generatedGraphQL: { type: 'T_CAREER' } } },
     { limit: 300, offset: 0, generatedGraphQL: { type: 'T_CAREER' } },
@@ -62,10 +63,12 @@ export function jobFromObject(x, pageUrl) {
 // Вакансии из API сайта. fetchJson(url, body) делает POST и возвращает JSON или null.
 // known — номер варианта запроса, который сработал в прошлый раз.
 export async function readSiteApi(api, pageUrl, fetchJson, known = null) {
-  const order = known != null ? [known, ...api.bodies.keys()].filter((v, i, a) => a.indexOf(v) === i) : [...api.bodies.keys()];
-  const endpoint = api.endpoint(new URL(pageUrl));
+  // Варианты запроса: каждый адрес × каждое тело. Номер рабочего варианта запоминается.
+  const variants = api.endpoints(new URL(pageUrl)).flatMap((endpoint) => api.bodies.map((body) => ({ endpoint, body })));
+  const all = [...variants.keys()];
+  const order = known != null && variants[known] ? [known, ...all.filter((i) => i !== known)] : all;
   for (const i of order) {
-    const json = await fetchJson(endpoint, api.bodies[i]).catch(() => null);
+    const json = await fetchJson(variants[i].endpoint, variants[i].body).catch(() => null);
     const list = api.list(json);
     if (Array.isArray(list) && list.length) {
       const items = list.map((x) => jobFromObject(x, pageUrl)).filter(Boolean);

@@ -29,6 +29,11 @@ test('T-Банк: страница карьеры читается через AP
   const again = await readSiteApi(api, page, async (u, b) => { calls.push(b); return json; }, 1);
   assert.equal(calls.length, 1);
   assert.equal(again.variant, 1);
+  // Сервер отвечает только на адрес с параметрами сайта — доходим и до него.
+  const seen = [];
+  const withParams = await readSiteApi(api, page, async (u, b) => { seen.push(u); return u.includes('appName=pfpjobs') ? json : null; });
+  assert.ok(withParams.items.length === 3 && seen.at(-1).endsWith('?appName=pfpjobs&origin=web%2Cib5%2Cplatform'));
+  assert.equal(withParams.variant, api.bodies.length, 'первый вариант второго адреса');
 });
 
 test('вакансия без ссылки ведёт на страницу списка', () => {
