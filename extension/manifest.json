@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "solk / job",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Мини-CRM для поиска работы: собирает вакансии с hh.ru, Avito, Telegram и сайтов компаний прямо в вашем браузере и показывает подходящие.",
   "permissions": [
     "storage",

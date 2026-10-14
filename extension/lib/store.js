@@ -9,6 +9,7 @@
 // поменяли в ту же секунду.
 
 import { DEFAULT_PROFILE } from './match.js';
+import { findCity, cityByAvitoSlug } from './geo.js';
 
 const local = chrome.storage.local;
 
@@ -32,6 +33,8 @@ export const DEFAULT_SETTINGS = {
   openIn: 'tab',           // 'tab' — фоновая вкладка, 'window' — свёрнутое окно
   retentionDays: 45,       // удалять старые вакансии, которые вы не трогали
   manualEnrichMax: 10,     // сколько описаний подгружать при сборе с текущей вкладки
+  scanLimit: 100,          // сколько вакансий собирать с одного источника за поиск
+  deepCheck: 20,           // у скольких лучших новых вакансий открывать полное описание
   pauseBetweenSources: [8000, 20000], // пауза между источниками, мс
 };
 
@@ -77,7 +80,8 @@ export const saveSettings = (settings) => local.set({ settings });
 
 export async function getSources() {
   const { sources } = await local.get('sources');
-  return sources || [];
+  // Старые источники назывались полной ссылкой — даём короткие имена.
+  return (sources || []).map((s) => (/^https?:\/\//.test(s.name) ? { ...s, name: sourceName(s.url, s.platform) } : s));
 }
 export const saveSources = (sources) => local.set({ sources });
 
@@ -85,7 +89,7 @@ export function makeSource(url, { platform, name, cfg } = {}) {
   const p = platform || detectPlatformByUrl(url);
   const d = PLATFORM_DEFAULTS[p];
   const normUrl = normalizeSourceUrl(url, p);
-  const defaultName = p === 'telegram' ? `TG: @${normUrl.split('/s/')[1] || ''}` : url;
+  const defaultName = sourceName(normUrl, p);
   return {
     id: `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
     platform: p,
@@ -117,6 +121,8 @@ export function vacanciesFrom(all) {
   for (const [k, v] of Object.entries(all)) {
     if (!k.startsWith('v:')) continue;
     const u = all[`u${k.slice(1)}`] || {};
+    // Снятые с публикации вакансии пропадают, если вы с ними ещё не работали.
+    if (v.archived && !['applied', 'interview', 'offer'].includes(u.status)) continue;
     out.push({ ...v, status: u.status || 'new', note: u.note || '', statusChangedAt: u.statusChangedAt || null });
   }
   return out;
@@ -148,10 +154,23 @@ export const saveResume = (resume) => (resume ? local.set({ resume }) : local.re
 // Когда в профиле указана должность, создаём (или обновляем) поиск на hh.ru и Avito.
 // Пользователь может выключить или удалить их — тогда мы их не трогаем.
 
-export function autoSearchUrl(platform, query) {
-  const q = encodeURIComponent(query);
-  if (platform === 'hh') return `https://hh.ru/search/vacancy?text=${q}&area=113&order_by=publication_time&search_period=30&items_on_page=50`;
-  if (platform === 'avito') return `https://www.avito.ru/all/vakansii?q=${q}&s=104`;
+// hh.ru понимает OR и кавычки — ищем сразу по должности и её синонимам.
+export function hhQuery(profile) {
+  const titles = [profile.position, ...(profile.titleKeywords || [])].map((t) => (t || '').trim()).filter(Boolean);
+  const uniq = [...new Map(titles.map((t) => [t.toLowerCase(), t])).values()].slice(0, 5);
+  return uniq.map((t) => (/\s/.test(t) ? `"${t}"` : t)).join(' OR ');
+}
+
+export function autoSearchUrl(platform, profileOrQuery) {
+  const profile = typeof profileOrQuery === 'string' ? { position: profileOrQuery } : profileOrQuery;
+  const city = findCity((profile.cities || [])[0]);
+  if (platform === 'hh') {
+    const q = encodeURIComponent(hhQuery(profile));
+    return `https://hh.ru/search/vacancy?text=${q}&area=${city?.hh || 113}&order_by=publication_time&search_period=30&items_on_page=50`;
+  }
+  if (platform === 'avito') {
+    return `https://www.avito.ru/${city?.avito || 'all'}/vakansii?q=${encodeURIComponent(profile.position.trim())}&s=104`;
+  }
   return null;
 }
 
@@ -164,8 +183,8 @@ export async function syncAutoSources(profile) {
   for (const platform of ['hh', 'avito']) {
     const idx = sources.findIndex((s) => s.auto === platform);
     if (!query) continue;
-    const url = autoSearchUrl(platform, query);
-    const name = `${PLATFORM_NAMES[platform]}: ${query}`;
+    const url = autoSearchUrl(platform, profile);
+    const name = sourceName(url, platform);
     if (idx >= 0) {
       if (sources[idx].url !== url) {
         sources[idx] = { ...sources[idx], url, name };
@@ -190,4 +209,33 @@ export async function removeSource(id) {
   }
   await saveSources(sources.filter((s) => s.id !== id));
   await local.remove(`srcstate:${id}`);
+}
+
+// Короткое понятное имя источника вместо длинной ссылки.
+export function sourceName(url, platform) {
+  try {
+    const u = new URL(url);
+    if (platform === 'telegram') return `TG: @${u.pathname.replace(/^\/s\//, '').split('/')[0]}`;
+    const host = u.hostname.replace(/^www\./, '');
+    const query = u.searchParams.get('text') || u.searchParams.get('q') || u.searchParams.get('query')
+      || u.searchParams.get('searchQuery') || u.searchParams.get('search') || '';
+    if (platform === 'hh') {
+      const q = query.replace(/"/g, '').split(' OR ')[0];
+      return `hh.ru: ${q || 'все вакансии'}${query.includes(' OR ') ? ' и похожие' : ''}`;
+    }
+    if (platform === 'avito') {
+      const slug = u.pathname.split('/')[1];
+      const city = slug && slug !== 'all' ? cityByAvitoSlug(slug) || slug : '';
+      return `Avito: ${query || 'вакансии'}${city ? `, ${city}` : ''}`;
+    }
+    const path = decodeURIComponent(u.pathname).replace(/\/+$/, '').split('/').filter(Boolean).slice(-1)[0] || '';
+    return `${host}${query ? `: ${query}` : path && path.length < 30 ? ` / ${path}` : ''}`;
+  } catch {
+    return url;
+  }
+}
+
+// Ссылка на одну вакансию, а не на поиск.
+export function isSingleVacancyUrl(url) {
+  return /hh\.ru\/vacancy\/\d+/.test(url) || /avito\.ru\/.+_\d{6,}(?:[?#]|$)/.test(url);
 }

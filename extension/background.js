@@ -55,7 +55,9 @@ async function planDue(settings, { force = false, sourceId = null } = {}) {
     if (sourceId) { due.push(s); continue; }
     if (force) {
       // «Найти работу» не дёргает источник, который только что обходили.
-      const fresh = st.lastRunAt && now - Date.parse(st.lastRunAt) < settings.manualGapMin * 60e3 && st.lastStatus !== 'failed';
+      // Если лимит увеличили — ищем заново, даже если недавно искали.
+      const fresh = st.lastRunAt && now - Date.parse(st.lastRunAt) < settings.manualGapMin * 60e3
+        && st.lastStatus !== 'failed' && (st.lastLimit || 0) >= settings.scanLimit;
       if (!fresh) due.push(s);
       continue;
     }
@@ -73,6 +75,9 @@ async function runQueue(due, settings) {
       if (i > 0) await sleep(rand(...settings.pauseBetweenSources));
       current = due[i].name;
       progress.current = progress.queue.shift();
+      progress.found = 0;
+      progress.page = 0;
+      progress.detail = 0;
       await runSource(due[i], settings);
       progress.done++;
     }
@@ -138,81 +143,243 @@ async function openHidden(url, mode) {
   return { tabId: win.tabs[0].id, close: () => chrome.windows.remove(win.id).catch(() => {}) };
 }
 
-async function extractInTab(tabId, cfg) {
+async function inject(tabId) {
   await chrome.scripting.executeScript({ target: { tabId }, files: ['extractors/page.js'] });
-  const [r] = await chrome.scripting.executeScript({
-    target: { tabId },
-    func: (c) => globalThis.__jobRadar.extract(c),
-    args: [cfg],
-  });
-  return r?.result || { items: [], error: 'пустой ответ экстрактора' };
 }
 
-async function knownIds(platform) {
-  const all = await store.getAll();
-  const p = `v:${platform}:`;
-  return Object.entries(all).filter(([k, v]) => k.startsWith(p) && v.enriched).map(([, v]) => v.externalId);
+async function callInTab(tabId, method, cfg) {
+  await inject(tabId);
+  const [r] = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: (m, c) => globalThis.__jobRadar[m](c),
+    args: [method, cfg],
+  });
+  return r?.result;
+}
+
+const extractInTab = async (tabId, cfg) => (await callInTab(tabId, 'extract', cfg)) || { items: [], error: 'пустой ответ экстрактора' };
+
+// Паузы между страницами выдачи и между карточками — как у человека.
+const PAGE_DELAY = { hh: [2500, 5000], avito: [4000, 8000], telegram: [1500, 3000], generic: [2000, 4000] };
+const DETAIL_DELAY = { hh: [2500, 6000], avito: [5000, 10000], generic: [2500, 5000], telegram: [2000, 4000] };
+const DETAIL_CAP = { hh: 50, avito: 10, generic: 10, telegram: 0 };
+const RECHECK_PER_RUN = { hh: 6, avito: 4, generic: 0, telegram: 0 };
+const MAX_PAGES = 100;
+
+// Переход вкладки на новый адрес: ждём сначала начала загрузки, потом её конца —
+// иначе можно прочитать старую страницу, у которой статус ещё «complete».
+function navigate(tabId, url, timeout = 45e3) {
+  return new Promise((resolve, reject) => {
+    let started = false;
+    const timer = setTimeout(() => { done(); reject(new Error('страница не загрузилась за 45 с')); }, timeout);
+    const listener = (id, info) => {
+      if (id !== tabId) return;
+      if (info.status === 'loading') started = true;
+      if (info.status === 'complete' && started) { done(); setTimeout(resolve, rand(1200, 2500)); }
+    };
+    const done = () => { clearTimeout(timer); chrome.tabs.onUpdated.removeListener(listener); };
+    chrome.tabs.onUpdated.addListener(listener);
+    chrome.tabs.update(tabId, { url }).catch((e) => { done(); reject(e); });
+  });
+}
+
+// Подробности: для hh и Avito — запросом с той же вкладки, для сайтов компаний —
+// переходом на страницу (там часто всё рисует JavaScript).
+async function fetchDetails(tabId, platform, list) {
+  if (!list.length) return { results: {}, blocked: null };
+  if (platform !== 'generic') {
+    return (await callInTab(tabId, 'details', { platform, items: list, delay: DETAIL_DELAY[platform] })) || { results: {}, blocked: null };
+  }
+  const results = {};
+  for (const it of list) {
+    try {
+      await navigate(tabId, it.url);
+      results[it.externalId] = await callInTab(tabId, 'current', { platform, waitMs: 1500 });
+    } catch (e) {
+      results[it.externalId] = { error: String(e?.message || e) };
+    }
+    await sleep(rand(...DETAIL_DELAY.generic));
+  }
+  return { results, blocked: null };
 }
 
 async function runSource(src, settings) {
   const started = new Date();
   const st = await store.getSrcState(src.id);
-  let res;
+  const limit = Math.max(1, Math.min(Number(settings.scanLimit) || 100, 5000));
+  const collected = new Map();
+  let total = null;
+  let blocked = null;
+  let error = null;
+  let pages = 0;
+  let stats = { found: 0, added: 0, updated: 0 };
+  let detailed = 0;
+  let archived = 0;
   let handle;
   try {
     handle = await openHidden(src.url, settings.openIn);
     await waitTabComplete(handle.tabId);
-    await sleep(rand(1500, 3500));
-    res = await extractInTab(handle.tabId, { platform: src.platform, ...src.cfg, knownIds: await knownIds(src.platform) });
+    await sleep(rand(1500, 3000));
+    let url = src.url;
+
+    // 1. Страницы выдачи — пока не наберём лимит или выдача не кончится.
+    for (;;) {
+      const res = await extractInTab(handle.tabId, { platform: src.platform, ...src.cfg, limit: limit - collected.size, pageNo: pages });
+      pages++;
+      if (pages === 1) total = res.total;
+      if (res.error && !res.items?.length) error = res.error;
+      if (res.blocked) { blocked = res.reason; break; }
+      const before = collected.size;
+      for (const it of res.items || []) if (!collected.has(it.externalId) && collected.size < limit) collected.set(it.externalId, it);
+      progress.found = collected.size;
+      progress.page = pages;
+      if (collected.size >= limit || collected.size === before || !res.nextUrl || pages >= MAX_PAGES) break;
+      url = res.nextUrl;
+      await sleep(rand(...PAGE_DELAY[src.platform]));
+      try { await navigate(handle.tabId, url); } catch (e) { error = String(e?.message || e); break; }
+    }
+
+    const items = [...collected.values()];
+    stats = await ingest(items, src.platform, src);
+
+    // 2. Подробное описание — только для лучших новых вакансий, чтобы не ждать часами.
+    if (!blocked && DETAIL_CAP[src.platform]) {
+      const want = Math.min(Number(settings.deepCheck) || 20, DETAIL_CAP[src.platform]);
+      const cand = await pickForDetails(items, src.platform, settings, want);
+      if (cand.length) {
+        progress.detail = cand.length;
+        const d = await fetchDetails(handle.tabId, src.platform, cand.map((c) => ({ externalId: c.externalId, url: c.url })));
+        const enriched = [];
+        for (const c of cand) {
+          const r = d.results[c.externalId];
+          if (!r || r.error) continue;
+          if (r.archived) { await markArchived(src.platform, c.externalId); archived++; continue; }
+          enriched.push({ ...collected.get(c.externalId), ...r });
+        }
+        if (enriched.length) await ingest(enriched, src.platform, src, { quiet: true });
+        detailed = enriched.length;
+        if (d.blocked) blocked = d.blocked;
+      }
+    }
+
+    // 3. Давно не встречавшиеся вакансии из вашего списка — не ушли ли в архив.
+    if (!blocked && RECHECK_PER_RUN[src.platform]) {
+      const stale = await pickForRecheck(src.platform, new Set(collected.keys()), settings);
+      if (stale.length) {
+        const d = await fetchDetails(handle.tabId, src.platform, stale);
+        const patch = {};
+        const all = await store.getAll();
+        for (const it of stale) {
+          const r = d.results[it.externalId];
+          const k = `v:${src.platform}:${it.externalId}`;
+          if (!all[k] || !r || r.error) continue;
+          patch[k] = { ...all[k], lastCheckedAt: new Date().toISOString(), ...(r.archived ? { archived: true, archivedAt: new Date().toISOString() } : {}) };
+          if (r.archived) archived++;
+        }
+        if (Object.keys(patch).length) await chrome.storage.local.set(patch);
+      }
+    }
+
+    // Сайт компании показывает весь список: если вакансии нет два обхода подряд — её сняли.
+    if (src.platform === 'generic' && !blocked && !error && collected.size && collected.size < limit) {
+      archived += await archiveMissing(src, new Set(collected.keys()));
+    }
   } catch (e) {
-    res = { items: [], error: String(e?.message || e) };
+    error = String(e?.message || e);
   } finally {
     handle?.close();
   }
 
-  const stats = await ingest(res.items || [], src.platform, src.name);
-  const failures = res.blocked || (res.error && !res.items?.length) ? (st.failures || 0) + 1 : 0;
+  const failures = blocked || (error && !collected.size) ? (st.failures || 0) + 1 : 0;
   let status = 'ok';
   let waitMin = src.intervalMin * rand(0.85, 1.15);
-  if (res.blocked) {
-    status = 'blocked';
+  if (blocked) {
+    status = collected.size ? 'partial' : 'blocked';
     waitMin = Math.max(BLOCK_PAUSE_MIN, src.intervalMin * 2 ** failures);
-    notify(`blocked:${src.id}`, `Источник «${src.name}» просит проверку`,
-      'Откройте страницу и пройдите проверку вручную. Обход этого источника приостановлен на 6 часов.', src.url);
+    notify(`blocked:${src.id}`, `«${src.name}» просит проверку`,
+      'Откройте страницу и пройдите проверку вручную. Источник приостановлен на 6 часов, найденное сохранено.', src.url);
   } else if (failures) {
     status = 'failed';
     waitMin = Math.min(24 * 60, src.intervalMin * 2 ** Math.min(failures, 5));
-  } else if (!res.items?.length) {
+  } else if (!collected.size) {
     status = 'empty';
   }
 
+  const note = [blocked || error, archived ? `в архиве: ${archived}` : null].filter(Boolean).join(' · ') || null;
   await store.setSrcState(src.id, {
     lastRunAt: started.toISOString(),
     nextRunAt: new Date(Date.now() + waitMin * 60e3).toISOString(),
     lastStatus: status,
-    lastError: res.reason || res.error || null,
-    lastFound: stats.found,
+    lastError: note,
+    lastTotal: total,
+    lastFound: collected.size,
     lastAdded: stats.added,
+    lastDetailed: detailed,
+    lastPages: pages,
+    lastLimit: limit,
     failures,
   });
   await store.addRun({
     at: started.toISOString(),
     source: src.name,
+    sourceId: src.id,
     platform: src.platform,
     status,
-    found: stats.found,
+    total,
+    found: collected.size,
     added: stats.added,
-    error: res.reason || res.error || null,
+    pages,
+    error: note,
     ms: Date.now() - started.getTime(),
   });
   return { status, ...stats };
+}
+
+async function markArchived(platform, externalId) {
+  const k = `v:${platform}:${externalId}`;
+  const cur = (await chrome.storage.local.get(k))[k];
+  if (cur) await chrome.storage.local.set({ [k]: { ...cur, archived: true, archivedAt: new Date().toISOString() } });
+}
+
+// Кандидаты на подробную проверку: ещё без описания, лучшие по предварительной оценке.
+async function pickForDetails(items, platform, settings, want) {
+  if (!want) return [];
+  const ids = new Set(items.map((i) => String(i.externalId)));
+  const rows = (await scored()).filter(({ v }) => v.platform === platform && ids.has(v.externalId) && !v.enriched && !v.archived);
+  const floor = settings.matchScore * 0.6;
+  return rows.filter(({ s }) => s.score >= floor).sort((a, b) => b.s.score - a.s.score).slice(0, want).map(({ v }) => v);
+}
+
+// Вакансии из вашего списка, которых не было в этой выдаче и которые давно не проверяли.
+async function pickForRecheck(platform, seenIds, settings) {
+  const dayAgo = Date.now() - 86400e3;
+  const rows = (await scored()).filter(({ v, s }) => v.platform === platform && !v.archived && !seenIds.has(v.externalId)
+    && (s.score >= settings.matchScore || ['applied', 'interview'].includes(v.status))
+    && !['hidden', 'rejected'].includes(v.status)
+    && Date.parse(v.lastCheckedAt || v.lastSeenAt || 0) < dayAgo);
+  return rows.sort((a, b) => b.s.score - a.s.score).slice(0, RECHECK_PER_RUN[platform]).map(({ v }) => ({ externalId: v.externalId, url: v.url }));
+}
+
+async function archiveMissing(src, seenIds) {
+  const all = await store.getAll();
+  const patch = {};
+  let n = 0;
+  for (const [k, v] of Object.entries(all)) {
+    if (!k.startsWith('v:generic:') || v.archived || !(v.sources || []).includes(src.name) || seenIds.has(v.externalId)) continue;
+    const missed = (v.missedRuns || 0) + 1;
+    patch[k] = { ...v, missedRuns: missed, ...(missed >= 2 ? { archived: true, archivedAt: new Date().toISOString() } : {}) };
+    if (missed >= 2) n++;
+  }
+  if (Object.keys(patch).length) await chrome.storage.local.set(patch);
+  return n;
 }
 
 // ---------- Сохранение ----------
 
 const HH_LINK_RE = /hh\.ru\/vacancy\/(\d+)/;
 
-async function ingest(items, platform, sourceName) {
+async function ingest(items, platform, src, { quiet = false } = {}) {
+  const sourceName = typeof src === 'string' ? src : src.name;
   const now = new Date();
   const nowIso = now.toISOString();
   const all = await store.getAll();
@@ -244,7 +411,7 @@ async function ingest(items, platform, sourceName) {
     const ex = get(key);
 
     if (ex) {
-      const merged = { ...ex, lastSeenAt: nowIso, sources: [...new Set([...(ex.sources || []), sourceName])] };
+      const merged = { ...ex, lastSeenAt: nowIso, missedRuns: 0, sources: [...new Set([...(ex.sources || []), sourceName])] };
       // Не затираем подробное описание кратким текстом из выдачи.
       for (const [f, val] of Object.entries(n)) {
         if (val == null || val === '' || (Array.isArray(val) && !val.length)) continue;
@@ -271,7 +438,7 @@ async function ingest(items, platform, sourceName) {
   }
 
   if (Object.keys(write).length) await chrome.storage.local.set(write);
-  if (fresh.length) await notifyFresh(new Set(fresh), settings);
+  if (fresh.length && !quiet) await notifyFresh(new Set(fresh), settings);
   scheduleBadge();
   return { found: items.length, added, updated };
 }
@@ -300,7 +467,8 @@ async function cleanup(settings) {
     const u = all[`u${k.slice(1)}`];
     const kept = u && !['new', 'viewed', 'hidden'].includes(u.status);
     const t = Date.parse(v.publishedAt || v.firstSeenAt);
-    if (!kept && t < limit) remove.push(k, `u${k.slice(1)}`);
+    const archivedLongAgo = v.archived && Date.parse(v.archivedAt || 0) < Date.now() - 2 * 86400e3;
+    if (!kept && (t < limit || archivedLongAgo)) remove.push(k, `u${k.slice(1)}`);
   }
   if (remove.length) await chrome.storage.local.remove(remove);
 }
@@ -331,25 +499,54 @@ async function updateBadge() {
 
 // ---------- Сообщения от popup и CRM ----------
 
+// Кнопка «Собрать с этой вкладки»: текущая страница + описания лучших.
 async function collectFromTab(tabId) {
   const settings = await store.getSettings();
   const tab = await chrome.tabs.get(tabId);
-  const platform = store.detectPlatformByUrl(tab.url);
-  const res = await extractInTab(tabId, {
-    platform: platform === 'telegram' && !/\/s\//.test(tab.url) ? 'generic' : 'auto',
-    enrichMax: settings.manualEnrichMax,
-    enrichDelay: [2000, 5000],
-    knownIds: await knownIds(platform),
-  });
-  const stats = await ingest(res.items || [], res.platform, `Вручную: ${new URL(tab.url).hostname}`);
-  await store.addRun({ at: new Date().toISOString(), source: `Вручную: ${tab.title}`, platform: res.platform, status: res.blocked ? 'blocked' : 'ok', found: stats.found, added: stats.added, error: res.reason || res.error || null, ms: 0 });
-  return { ...stats, platform: res.platform, blocked: res.blocked, reason: res.reason, error: res.error };
+  const host = new URL(tab.url).hostname;
+  const res = await extractInTab(tabId, { platform: 'auto', limit: 1000 });
+  const src = `Вручную: ${host}`;
+  const stats = await ingest(res.items || [], res.platform, src);
+  let detailed = 0;
+  if (!res.blocked && res.platform !== 'telegram') {
+    const cand = await pickForDetails(res.items || [], res.platform, settings, Math.min(settings.manualEnrichMax, DETAIL_CAP[res.platform] || 0));
+    if (cand.length && res.platform !== 'generic') {
+      const d = await callInTab(tabId, 'details', { platform: res.platform, items: cand.map((c) => ({ externalId: c.externalId, url: c.url })), delay: [2000, 4500] });
+      const byId = new Map((res.items || []).map((i) => [String(i.externalId), i]));
+      const enriched = cand.map((c) => d?.results?.[c.externalId] && !d.results[c.externalId].error && !d.results[c.externalId].archived
+        ? { ...byId.get(c.externalId), ...d.results[c.externalId] } : null).filter(Boolean);
+      if (enriched.length) await ingest(enriched, res.platform, src, { quiet: true });
+      detailed = enriched.length;
+    }
+  }
+  await store.addRun({ at: new Date().toISOString(), source: `Вручную: ${tab.title}`, platform: res.platform, status: res.blocked ? 'blocked' : 'ok', total: res.total, found: stats.found, added: stats.added, error: res.reason || res.error || null, ms: 0 });
+  return { ...stats, detailed, total: res.total, platform: res.platform, blocked: res.blocked, reason: res.reason, error: res.error };
+}
+
+// Пример подходящей вакансии для профиля: открываем ссылку и читаем её текст.
+async function inspectUrl(url) {
+  const settings = await store.getSettings();
+  const handle = await openHidden(url, settings.openIn);
+  try {
+    await waitTabComplete(handle.tabId);
+    const platform = store.detectPlatformByUrl(url);
+    const r = await callInTab(handle.tabId, 'current', { platform: platform === 'telegram' ? 'generic' : platform, waitMs: 2500 });
+    if (!r) throw new Error('страница не прочиталась');
+    if (r.archived) return { error: 'Эта вакансия уже в архиве' };
+    const title = r.title || r.pageTitle || '';
+    const text = [r.description, (r.tags || []).join(', ')].filter(Boolean).join('\n').slice(0, 6000);
+    if (!title && text.length < 50) throw new Error('на странице не нашлось текста вакансии');
+    return { url, title, company: r.company || '', text };
+  } finally {
+    handle.close();
+  }
 }
 
 const handlers = {
   runNow: ({ sourceId }) => startManual(sourceId),
   status: async () => ({ running, current, progress }),
   collectTab: ({ tabId }) => collectFromTab(tabId),
+  inspectUrl: ({ url }) => inspectUrl(url),
   async addSource({ url, name, platform }) {
     const sources = await store.getSources();
     const src = store.makeSource(url, { name, platform });

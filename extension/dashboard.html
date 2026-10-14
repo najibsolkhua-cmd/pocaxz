@@ -41,17 +41,30 @@
     <!-- Центральная плитка -->
     <section class="tile t-main" id="mainTile">
       <div class="main-top">
-        <div class="clock"><div class="time" id="clockTime">--:--</div><div class="date" id="clockDate"></div></div>
-        <div class="brand"><span class="solk">solk</span><span class="slash-job">/ job</span></div>
+        <div class="clock">
+          <!-- SVG: обводка рисуется под заливкой (paint-order), поэтому контур ровный, без артефактов -->
+          <svg class="time" id="clockSvg" aria-hidden="true"><text id="clockText" x="0" y="0" fill="#b81400" stroke="#fff" stroke-width="7" stroke-linejoin="round" paint-order="stroke">00:00</text></svg>
+          <div class="date" id="clockDate"></div>
+        </div>
+        <img class="brand" src="img/solk-job.svg" alt="solk / job" draggable="false">
       </div>
       <button class="who" id="who" type="button" data-open="profile">
         <span class="name" id="whoName"></span>
         <span class="position" id="whoPosition"></span>
       </button>
-      <button class="find" id="findBtn" type="button">
-        <span class="find-fill" id="findFill"></span>
-        <span class="find-text" id="findText">/ Найти работу</span>
-      </button>
+      <div class="main-bottom">
+        <div class="limit" role="group" aria-label="Сколько вакансий проверить в каждом источнике">
+          <span class="limit-label">Проверить в каждом источнике:</span>
+          <button type="button" data-limit="10">10</button>
+          <button type="button" data-limit="100">100</button>
+          <button type="button" data-limit="1000">1000</button>
+          <input id="limitInput" type="number" min="1" max="5000" step="1" placeholder="своё" aria-label="Своё число вакансий">
+        </div>
+        <button class="find" id="findBtn" type="button">
+          <span class="find-fill" id="findFill"></span>
+          <span class="find-text" id="findText">/ Найти работу</span>
+        </button>
+      </div>
     </section>
 
     <!-- Лучшее -->

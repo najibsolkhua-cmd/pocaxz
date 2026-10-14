@@ -25,7 +25,7 @@ export function vacancyCard(v, s) {
   const waiting = v.status === 'applied' ? daysSince(v.statusChangedAt) : null;
 
   return h('article', { class: `vc st-${v.status}`, 'data-key': v.key },
-    h('div', { class: `vc-score ${pct >= 65 ? 'hi' : pct >= 45 ? 'mid' : ''}`, title: scoreTitle(s) }, pct),
+    h('div', { class: `vc-score ${pct >= 65 ? 'hi' : pct >= 45 ? 'mid' : ''}`, title: scoreTitle(s) }, h('b', {}, `${pct}%`), h('small', {}, 'подходит')),
     h('div', { class: 'vc-body' },
       h('h3', {},
         v.status === 'new' ? h('span', { class: 'vc-new', title: 'Ещё не смотрели' }) : null,
@@ -38,6 +38,7 @@ export function vacancyCard(v, s) {
         v.formats?.length ? h('span', {}, v.formats.map((f) => FORMAT_LABEL[f]).join(', ')) : null,
         h('span', { class: 'vc-src' }, `${store.PLATFORM_NAMES[v.platform]} · ${ago(v.publishedAt || v.firstSeenAt)}`),
         waiting != null ? h('span', { class: `vc-wait ${waiting >= 7 ? 'late' : ''}` }, `ждёт ответа ${waiting} дн`) : null),
+      h('div', { class: 'vc-why' }, whyLine(s)),
       (v.snippet || v.description) ? h('p', { class: 'vc-snippet' }, (v.snippet || v.description).slice(0, 360)) : null,
       (s.matched.length || s.missing.length) ? h('div', { class: 'chips' },
         s.matched.map((k) => h('span', { class: 'chip ok', title: 'Есть у вас' }, skillName(k))),
@@ -50,6 +51,23 @@ export function vacancyCard(v, s) {
         store.STATUSES.map(([k, label]) => h('option', { value: k, selected: k === v.status }, label))),
       h('button', { class: 'link', type: 'button', onclick: () => { noteBox.hidden = !noteBox.hidden; if (!noteBox.hidden) noteBox.querySelector('textarea').focus(); } }, v.note ? 'Заметка ✎' : 'Заметка'),
       v.status !== 'hidden' ? h('button', { class: 'link muted', type: 'button', onclick: () => setStatus('hidden') }, 'Скрыть') : null));
+}
+
+// Короткое объяснение оценки прямо в карточке.
+function whyLine(s) {
+  if (s.stopped) return `Стоп-слово «${s.stopped}»`;
+  if (!s.parts) return '';
+  const p = s.parts;
+  const w = s.weights || {};
+  const out = [];
+  out.push(p.title >= 0.99 ? 'должность ✓' : p.title > 0 ? `должность ${Math.round(p.title * 100)}%` : 'другая должность');
+  if (w.skills) out.push(`навыки ${s.matched.length} из ${Math.ceil(s.skillsTotal || 0)}`);
+  if (w.text) out.push(`похоже на резюме и опыт ${Math.round(p.text * 100)}%`);
+  if (p.salary === 1) out.push('зарплата ✓');
+  else if (p.salary === 0) out.push('зарплата ниже');
+  if (p.grade === 1) out.push('грейд ✓');
+  else if (p.grade === 0) out.push('другой грейд');
+  return out.join(' · ');
 }
 
 function scoreTitle(s) {
@@ -71,21 +89,27 @@ export function createVacancyList({ platform = null, statuses = null, showStatus
   const scoreVal = h('span', { class: 'muted' }, `${st.minScore}%`);
   const filters = h('div', { class: 'filters' },
     h('input', { type: 'search', placeholder: 'Поиск по названию, компании, тексту', oninput: (e) => { st.q = e.target.value.toLowerCase(); st.limit = PAGE; draw(); } }),
-    statuses ? null : h('select', { onchange: (e) => { st.status = e.target.value; st.limit = PAGE; draw(); } },
-      h('option', { value: 'active' }, 'Без скрытых и отказов'),
-      h('option', { value: 'new' }, 'Только новые'),
-      h('option', { value: 'all' }, 'Все статусы')),
+    statuses ? null : h('label', { class: 'flabel' }, 'Показать',
+      h('select', { onchange: (e) => { st.status = e.target.value; st.limit = PAGE; draw(); } },
+        h('option', { value: 'active' }, 'все, кроме скрытых и отказов'),
+        h('option', { value: 'new' }, 'только непросмотренные'),
+        h('option', { value: 'all' }, 'все, включая скрытые и отказы'))),
     showPlatform ? h('select', { onchange: (e) => { st.platform = e.target.value; st.limit = PAGE; draw(); } },
       h('option', { value: '' }, 'Все источники'),
       Object.entries(store.PLATFORM_NAMES).map(([k, n]) => h('option', { value: k, selected: k === st.platform }, n))) : null,
-    statuses ? null : h('label', { class: 'range' }, 'от',
+    statuses ? null : h('label', { class: 'range', title: 'Показывать вакансии, которые подходят вам не меньше чем на столько процентов' }, 'Подходит мне от',
       h('input', { type: 'range', min: 0, max: 100, step: 5, value: st.minScore, oninput: (e) => { st.minScore = Number(e.target.value); scoreVal.textContent = `${st.minScore}%`; st.limit = PAGE; draw(); } }),
       scoreVal),
-    h('select', { onchange: (e) => { st.sort = e.target.value; draw(); } },
-      h('option', { value: 'score' }, 'Сначала подходящие'),
-      h('option', { value: 'date' }, 'Сначала свежие')));
+    h('label', { class: 'flabel' }, 'Сортировка',
+      h('select', { onchange: (e) => { st.sort = e.target.value; draw(); } },
+        h('option', { value: 'score' }, 'сначала подходящие'),
+        h('option', { value: 'date' }, 'сначала свежие'))));
+  const hint = statuses ? null : h('details', { class: 'hint-box' },
+    h('summary', {}, 'Что значат проценты и статусы?'),
+    h('p', {}, '«Подходит мне» — насколько вакансия совпадает с вашим профилем: желаемая должность и её синонимы, навыки, текст резюме и «Чем я занимаюсь», зарплата, грейд и свежесть. Под каждой вакансией написано, из чего сложилась оценка. Ползунок скрывает вакансии ниже выбранного процента — только те, что вы ещё не разбирали.'),
+    h('p', {}, 'Статусы ставите вы сами: «Отправил резюме» — откликнулись, «Отказ» — работодатель ответил отказом, «Скрыто» — вакансия неинтересна. Система их не угадывает. Вакансии, снятые с публикации или ушедшие в архив, исчезают из списка сами.'));
 
-  const root = h('div', { class: 'vc-wrap' }, showStatusTabs ? tabsEl : null, filters, listEl, h('div', { class: 'center' }, moreBtn));
+  const root = h('div', { class: 'vc-wrap' }, showStatusTabs ? tabsEl : null, filters, hint, listEl, h('div', { class: 'center' }, moreBtn));
 
   function draw() {
     if (showStatusTabs) {

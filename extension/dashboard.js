@@ -37,8 +37,35 @@ const matching = (rows) => rows.filter(({ v, s }) => isLive(v) && s.score >= sta
 
 function renderClock() {
   const d = new Date();
-  $('clockTime').textContent = d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+  const t = d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+  const text = $('clockText');
+  if (text.textContent !== t || !$('clockSvg').getAttribute('viewBox')) {
+    text.textContent = t;
+    // Подгоняем viewBox под текст, чтобы часы масштабировались целиком.
+    const b = text.getBBox();
+    if (b.width) $('clockSvg').setAttribute('viewBox', `${b.x - 6} ${b.y + b.height * 0.17} ${b.width + 12} ${b.height * 0.72}`);
+  }
   $('clockDate').textContent = d.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' });
+}
+
+function renderLimit() {
+  const n = Number(state.settings.scanLimit) || 100;
+  let preset = false;
+  document.querySelectorAll('.limit button').forEach((b) => {
+    const on = Number(b.dataset.limit) === n;
+    preset ||= on;
+    b.classList.toggle('on', on);
+  });
+  const inp = $('limitInput');
+  if (document.activeElement !== inp) inp.value = preset ? '' : String(n);
+  inp.classList.toggle('on', !preset);
+}
+
+async function setLimit(n) {
+  const v = Math.max(1, Math.min(5000, Math.round(Number(n) || 0)));
+  if (!v) return;
+  await store.saveSettings({ ...(await store.getSettings()), scanLimit: v });
+  toast(`Буду проверять до ${v} ${plural(v, 'вакансии', 'вакансий', 'вакансий')} в каждом источнике`);
 }
 
 function renderSourceTiles() {
@@ -59,15 +86,18 @@ function renderSourceTiles() {
     tile.classList.toggle('scanning', scanning);
     tile.classList.toggle('has-new', fresh.length > 0);
     tile.querySelector('.count').textContent = rows.length || srcs.length ? good.length.toLocaleString('ru-RU') : '';
-    tile.title = `${store.PLATFORM_NAMES[p]}: подходящих ${good.length}, из них новых ${fresh.length}; всего найдено ${rows.length}`;
+    tile.title = `${store.PLATFORM_NAMES[p]}: подходят вам ${good.length} из ${rows.length} собранных, новых ${fresh.length}`;
 
     let sub;
-    if (scanning) sub = 'идёт поиск…';
+    if (scanning) sub = prog.page ? `ищу… стр. ${prog.page} · ${prog.found || 0} вак.` : 'ищу…';
     else if (queued) sub = 'в очереди';
     else if (!srcs.length) sub = p === 'hh' || p === 'avito' ? 'укажите должность в профиле' : '+ добавить источник';
-    else if (blocked) sub = '⚠ нужна проверка';
+    else if (blocked) sub = '⚠ сайт просит проверку — откройте';
     else if (!last) sub = `${srcs.length} ${plural(srcs.length, 'источник', 'источника', 'источников')} · ещё не искали`;
-    else sub = `${fresh.length} ${plural(fresh.length, 'новая', 'новых', 'новых')} · ${ago(last)}`;
+    else {
+      const onSite = states.map((st) => st.lastTotal).filter((n) => n > 0).reduce((a, b) => a + b, 0);
+      sub = `подходят ${good.length} из ${rows.length}${onSite ? ` · на сайте ${onSite.toLocaleString('ru-RU')}` : ` · ${ago(last)}`}`;
+    }
     tile.querySelector('.sub').textContent = sub;
     tile.classList.toggle('warn', blocked && !scanning);
   }
@@ -85,7 +115,8 @@ function renderMain() {
   btn.classList.toggle('busy', running);
   if (running && progress?.total) {
     const cur = progress.current;
-    $('findText').textContent = `Ищу: ${cur ? store.PLATFORM_NAMES[cur.platform] : '…'} · ${Math.min(progress.done + 1, progress.total)} из ${progress.total}`;
+    const step = progress.detail ? ` · читаю описания` : progress.page ? ` · стр. ${progress.page}, ${progress.found || 0} вак.` : '';
+    $('findText').textContent = `Ищу: ${cur ? cur.name : '…'}${step} · источник ${Math.min(progress.done + 1, progress.total)} из ${progress.total}`;
     $('findFill').style.width = `${Math.round((progress.done / progress.total) * 100)}%`;
   } else if (running) {
     $('findText').textContent = 'Ищу…';
@@ -133,12 +164,30 @@ function renderTopTile() {
     : h('p', { class: 'cta' }, state.scored.length ? 'Новых подходящих нет — загляните позже или ослабьте условия в профиле.' : 'Нажмите «/ Найти работу» — здесь появятся лучшие совпадения.'));
 }
 
-function renderFunnelTile() {
+// Те же числа, что на плитках источников и в «Поиске»: «подходят» = сумма по источникам.
+function funnelCounts() {
+  const good = matching(state.scored);
   const c = {};
   for (const { v } of state.scored) c[v.status] = (c[v.status] || 0) + 1;
-  const newGood = matching(state.scored).filter(({ v }) => v.status === 'new').length;
-  const rows = [['Новые подходящие', newGood], ['Просмотрел', c.viewed || 0], ['Отправил резюме', c.applied || 0], ['Интервью', c.interview || 0], ['Оффер', c.offer || 0], ['Отказ', c.rejected || 0]];
-  $('funnelTile').replaceChildren(h('ul', { class: 'funnel' }, rows.map(([label, n]) => h('li', {}, h('b', {}, n), h('span', {}, label)))));
+  return {
+    good: good.length,
+    unseen: good.filter(({ v }) => v.status === 'new').length,
+    viewed: c.viewed || 0, applied: c.applied || 0, interview: c.interview || 0, offer: c.offer || 0, rejected: c.rejected || 0,
+  };
+}
+
+function renderFunnelTile() {
+  const f = funnelCounts();
+  const rows = [
+    ['lead', 'Подходят вам', f.good],
+    ['sub', 'ещё не смотрел', f.unseen],
+    ['', 'Просмотрел', f.viewed],
+    ['', 'Отправил резюме', f.applied],
+    ['', 'Интервью', f.interview],
+    ['', 'Оффер', f.offer],
+    ['', 'Отказ', f.rejected],
+  ];
+  $('funnelTile').replaceChildren(h('ul', { class: 'funnel' }, rows.map(([cls, label, n]) => h('li', { class: cls }, h('b', {}, n), h('span', {}, label)))));
 }
 
 function renderSearchTile() {
@@ -148,11 +197,11 @@ function renderSearchTile() {
   const problems = srcStates.filter((st) => st.lastStatus === 'blocked' || st.lastStatus === 'failed').length;
   const next = srcStates.map((st) => st.nextRunAt).filter(Boolean).sort()[0];
   const total = state.scored.length;
-  const good = matching(state.scored).length;
+  const good = funnelCounts().good;
   const auto = state.settings.autoRun;
   $('searchTile').replaceChildren(h('dl', { class: 'facts' },
     h('dt', {}, 'Последний поиск'), h('dd', {}, last ? fmtTime(last.at) : 'ещё не было'),
-    h('dt', {}, 'Подходящих'), h('dd', {}, `${good} из ${total}`),
+    h('dt', {}, 'Подходят вам'), h('dd', {}, `${good} из ${total} собранных`),
     h('dt', {}, 'Источников'), h('dd', {}, `${state.sources.filter((s) => s.enabled).length}${problems ? ` · ⚠ ${problems} с проблемой` : ''}`),
     h('dt', {}, 'Авто-поиск'), h('dd', {}, auto ? (next ? `следующий ${fmtTime(next)}` : 'включён') : 'выключен')));
 }
@@ -172,6 +221,7 @@ function renderAppliedTile() {
 }
 
 function renderHome() {
+  renderLimit();
   renderSourceTiles();
   renderMain();
   renderProfileTile();
@@ -249,18 +299,27 @@ function buildPlatformDrawer(body, platform) {
   drawer.refresh = () => {
     const rows = state.scored.filter(({ v }) => v.platform === platform);
     const good = matching(rows);
+    const srcs = state.sources.filter((s) => s.platform === platform);
+    const onSite = srcs.map((s) => state.all[`srcstate:${s.id}`]?.lastTotal).filter((n) => n > 0);
     stats.replaceChildren(
-      stat(good.length, 'подходят вам'),
-      stat(good.filter(({ v }) => v.status === 'new').length, 'новых'),
-      stat(rows.length, 'всего найдено'),
-      stat(rows.filter(({ v }) => ['applied', 'interview', 'offer'].includes(v.status)).length, 'откликов'));
+      stat(onSite.length ? onSite.reduce((a, b) => a + b, 0) : '—', 'вакансий на сайте', 'Сколько вакансий площадка показывает по вашим ссылкам'),
+      stat(rows.length, 'собрано', `Проверяем до ${state.settings.scanLimit} в каждом источнике — лимит меняется на главной`),
+      stat(good.length, 'подходят вам', `С оценкой «Подходит мне» от ${Math.round(state.settings.matchScore * 100)}%`),
+      stat(good.filter(({ v }) => v.status === 'new').length, 'ещё не смотрели'));
     list.update(rows);
-    if (!srcBox.contains(document.activeElement)) srcBox.replaceChildren(sourceRows(state.sources.filter((s) => s.platform === platform), state.all));
+    if (!isEditing(srcBox)) srcBox.replaceChildren(sourceRows(srcs, state.all));
   };
   drawer.refresh();
 }
 
-const stat = (n, label) => h('div', { class: 'stat' }, h('b', {}, n.toLocaleString('ru-RU')), h('span', {}, label));
+const stat = (n, label, title) => h('div', { class: 'stat', title }, h('b', {}, typeof n === 'number' ? n.toLocaleString('ru-RU') : n), h('span', {}, label));
+
+// Перерисовываем блок, только если вы в нём сейчас ничего не вводите.
+// (Раньше проверялся любой фокус — и после «Удалить» список не обновлялся.)
+const isEditing = (box) => {
+  const a = document.activeElement;
+  return box.contains(a) && (a.tagName === 'TEXTAREA' || a.tagName === 'SELECT' || (a.tagName === 'INPUT' && !['checkbox', 'radio', 'button'].includes(a.type)));
+};
 
 async function buildProfileDrawer(body) {
   drawer.refresh = null; // форму не перерисовываем на лету
@@ -328,7 +387,7 @@ function buildSearchDrawer(body) {
       h('table', { class: 'log' }, h('thead', {}, h('tr', {}, ['Когда', 'Источник', 'Итог', 'Найдено', 'Новых', 'Комментарий'].map((t) => h('th', {}, t)))), logBody)));
 
   drawer.refresh = () => {
-    if (!srcBox.contains(document.activeElement)) srcBox.replaceChildren(sourceRows(state.sources, state.all));
+    if (!isEditing(srcBox)) srcBox.replaceChildren(sourceRows(state.sources, state.all));
     const runs = (state.all.runs || []).slice(0, 60);
     logBody.replaceChildren(...(runs.length ? runs.map((r) => h('tr', {},
       h('td', {}, fmtTime(r.at)), h('td', {}, r.source), h('td', { class: `st-${r.status}` }, { ok: 'ok', empty: 'пусто', failed: 'ошибка', blocked: 'проверка' }[r.status] || r.status),
@@ -375,13 +434,15 @@ async function findWork() {
     return;
   }
   const r = await send({ type: 'runNow' });
+  startedHere = Boolean(r?.started);
   if (r?.busy) toast('Поиск уже идёт');
-  else if (r && !r.started) toast('Все источники проверены меньше 10 минут назад — свежие результаты уже на плитках');
+  else if (r && !r.started) toast('Все источники уже проверены за последние 10 минут — результаты на плитках. Чтобы проверить больше вакансий, увеличьте лимит.');
   else toast(`Ищу в ${r.total} ${plural(r.total, 'источнике', 'источниках', 'источниках')}. Вкладки будут открываться в фоне и закрываться сами.`);
   pollStatus();
 }
 
 let pollTimer;
+let startedHere = false; // итог показываем только для поиска, запущенного кнопкой на этой странице
 async function pollStatus() {
   clearTimeout(pollTimer);
   const st = await send({ type: 'status' }).catch(() => null);
@@ -390,10 +451,12 @@ async function pollStatus() {
     state.status = st;
     renderMain();
     renderSourceTiles();
-    if (wasRunning && !st.running) {
+    if (wasRunning && !st.running && startedHere) {
+      startedHere = false;
       const runs = (state.all.runs || []).slice(0, st.progress?.total || 0);
+      const found = runs.reduce((n, r) => n + (r.found || 0), 0);
       const added = runs.reduce((n, r) => n + (r.added || 0), 0);
-      toast(`Поиск завершён: новых вакансий ${added}, подходящих сейчас ${matching(state.scored).length}`);
+      toast(`Поиск завершён: проверено ${found}, новых ${added}, подходят вам ${funnelCounts().good}`);
     }
   }
   pollTimer = setTimeout(pollStatus, state.status.running ? 1000 : 5000);
@@ -433,6 +496,9 @@ function bind() {
   });
   $('who').addEventListener('click', (e) => { e.stopPropagation(); location.hash = 'profile'; });
   $('findBtn').addEventListener('click', (e) => { e.stopPropagation(); findWork(); });
+  document.querySelectorAll('.limit button').forEach((b) => b.addEventListener('click', () => setLimit(b.dataset.limit)));
+  $('limitInput').addEventListener('change', (e) => setLimit(e.target.value));
+  $('limitInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') e.target.blur(); });
   $('scrim').addEventListener('click', () => { location.hash = ''; });
   document.querySelector('.drawer-close').addEventListener('click', (e) => { e.preventDefault(); location.hash = ''; });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && drawer) location.hash = ''; });

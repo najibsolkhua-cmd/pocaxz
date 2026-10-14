@@ -71,9 +71,9 @@ test('навыки: короткие синонимы только с загла
 });
 
 test('свой навык из профиля', () => {
-  const custom = resolveSkill('Битрикс24');
+  const custom = resolveSkill('Мегаплан');
   assert.equal(custom.custom, true);
-  assert.deepEqual(extractSkills('Доработка Битрикс24 и интеграции', [custom]).required.includes(custom.slug), true);
+  assert.deepEqual(extractSkills('Настройка Мегаплан и интеграции', [custom]).required.includes(custom.slug), true);
   assert.equal(resolveSkill('postgres').slug, 'postgresql');
 });
 

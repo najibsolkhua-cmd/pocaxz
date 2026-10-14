@@ -257,11 +257,13 @@ export function companyFromPost(text) {
 }
 
 // ---------- Сайты компаний: ссылка — это вакансия? ----------
+// Названия любые («Продавец-кассир», «Товаровед»), поэтому отсекаем только явную навигацию.
 
-const JOB_TITLE_RE = /(разработчик|программист|developer|engineer|инженер|аналитик|analyst|менеджер|manager|специалист|дизайнер|designer|тестировщик|\bqa\b|devops|sre|lead|лид|head|руководител|архитектор|architect|администратор|admin|стаж[её]р|intern|scientist|data|оператор|консультант|эксперт|owner|scrum|бухгалтер|юрист|рекрутер|hr)/iu;
+const JUNK_TITLE_RE = /^(о нас|о компании|компания|бонусы|льготы|преимущества|контакты|войти|вход|регистрация|все вакансии|вакансии|карьера|блог|новости|пресс|faq|вопросы|помощь|политика|главная|наши ценности|ценности|команда|офисы?|как мы работаем|как устроен|отбор|этапы|стажировк[аи]$|студентам|выпускникам|направлени[яе]|подписаться|поделиться|cookie|куки|privacy|about|benefits|contacts?|login|sign in|blog|news|home)(?![\p{L}])/iu;
 
 export function looksLikeJobTitle(title) {
-  return JOB_TITLE_RE.test(title || '');
+  const t = normSpaces(title);
+  return t.length >= 4 && t.length <= 160 && !JUNK_TITLE_RE.test(t);
 }
 
 // ---------- Сборка вакансии ----------
@@ -276,15 +278,16 @@ export function dedupKey(company, title) {
 // item — то, что вернул экстрактор со страницы (см. extractors/page.js).
 export function normalizeItem(item, platform, now = new Date()) {
   const isPost = platform === 'telegram' || platform === 'vk';
-  const body = normSpaces([item.snippet, item.description].filter(Boolean).join('\n')).slice(0, 8000);
+  const body = normSpaces([item.snippet, item.description, item.formatText].filter(Boolean).join('\n')).slice(0, 9000);
   const fullText = [item.title, item.salaryText, item.cardText, body, (item.tags || []).join(', ')].filter(Boolean).join('\n');
 
   if (isPost && !looksLikeVacancy(fullText)) return null;
 
-  const title = normSpaces(item.title) || (isPost ? titleFromPost(item.description || item.cardText) : '');
+  const title = normSpaces(item.title) || normSpaces(item.pageTitle) || (isPost ? titleFromPost(item.description || item.cardText) : '');
   if (!title) return null;
   // На сайтах компаний ссылки вида /careers/about тоже похожи на вакансии.
   if (platform === 'generic' && !looksLikeJobTitle(title)) return null;
+  if (item.archived) return null;
   const company = normSpaces(item.company) || (isPost ? companyFromPost(fullText) : '');
   const skillText = [title, body, (item.tags || []).join(', '), item.cardText].filter(Boolean).join('\n');
   const { required, optional } = extractSkills(skillText);

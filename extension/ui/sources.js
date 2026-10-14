@@ -6,7 +6,6 @@ import { h, fmtTime } from './dom.js';
 const send = (msg) => chrome.runtime.sendMessage(msg);
 const INTERVALS = [30, 60, 120, 240, 360, 720, 1440];
 const intervalLabel = (m) => (m < 60 ? `каждые ${m} мин` : m < 1440 ? `каждые ${m / 60} ч` : 'раз в сутки');
-const STATUS_TEXT = { ok: 'ok', empty: 'пусто', failed: 'ошибка', blocked: 'нужна проверка' };
 
 const ADD_HELP = {
   hh: {
@@ -39,35 +38,51 @@ function toUrl(platform, raw) {
   return null;
 }
 
-export function sourceRows(sources, all, { compact = false } = {}) {
+function stateLine(st) {
+  if (!st.lastRunAt) return 'ещё не искали';
+  const parts = [fmtTime(st.lastRunAt)];
+  if (st.lastStatus === 'failed') parts.push('ошибка');
+  else if (st.lastStatus === 'blocked') parts.push('сайт попросил проверку');
+  else {
+    if (st.lastTotal) parts.push(`на сайте ${st.lastTotal.toLocaleString('ru-RU')}`);
+    parts.push(`собрано ${st.lastFound ?? 0}`);
+    if (st.lastAdded) parts.push(`новых ${st.lastAdded}`);
+    if (st.lastDetailed) parts.push(`описаний ${st.lastDetailed}`);
+    if (st.lastStatus === 'partial') parts.push('остановлено проверкой');
+  }
+  return parts.join(' · ');
+}
+
+export function sourceRows(sources, all) {
   const update = async (id, patch) => {
     const list = await store.getSources();
     await store.saveSources(list.map((s) => (s.id === id ? { ...s, ...patch } : s)));
   };
-  if (!sources.length) return h('div', { class: 'empty small' }, 'Источников пока нет.');
+  if (!sources.length) return h('div', { class: 'empty small' }, 'Источников пока нет — добавьте ниже.');
   return h('div', { class: 'src-list' }, sources.map((s) => {
     const st = all[`srcstate:${s.id}`] || {};
+    const bad = ['failed', 'blocked', 'partial'].includes(st.lastStatus);
     return h('div', { class: `src-row ${s.enabled ? '' : 'off'}` },
-      h('label', { class: 'switch', title: s.enabled ? 'Включён' : 'Выключен' },
+      h('label', { class: 'switch', title: s.enabled ? 'Включён — нажмите, чтобы выключить' : 'Выключен' },
         h('input', { type: 'checkbox', checked: s.enabled, onchange: (e) => update(s.id, { enabled: e.target.checked }) }), h('span', {})),
       h('div', { class: 'src-main' },
-        h('div', { class: 'src-name' }, s.name, s.auto ? h('span', { class: 'tag' }, 'по должности') : null),
-        h('a', { class: 'src-url', href: s.url, target: '_blank', rel: 'noopener' }, s.url),
-        h('div', { class: 'src-state' },
-          st.lastRunAt ? `${fmtTime(st.lastRunAt)} · ` : 'ещё не искали',
-          st.lastStatus ? h('span', { class: `st-${st.lastStatus}` }, STATUS_TEXT[st.lastStatus]) : null,
-          st.lastStatus === 'ok' || st.lastStatus === 'empty' ? ` · найдено ${st.lastFound}, новых ${st.lastAdded}` : null,
+        h('div', { class: 'src-name', title: s.name }, h('span', { class: 'src-title' }, s.name), s.auto ? h('span', { class: 'tag' }, 'по должности') : null),
+        h('a', { class: 'src-url', href: s.url, target: '_blank', rel: 'noopener', title: s.url }, s.url),
+        h('div', { class: `src-state ${bad ? 'bad' : ''}` }, stateLine(st),
           st.lastError ? h('span', { class: 'muted' }, ` · ${st.lastError}`) : null,
-          st.lastStatus === 'blocked' ? h('a', { href: s.url, target: '_blank', rel: 'noopener', class: 'fix' }, ' Открыть и пройти проверку →') : null)),
-      compact ? null : h('select', { onchange: (e) => update(s.id, { intervalMin: Number(e.target.value) }) },
-        INTERVALS.map((m) => h('option', { value: m, selected: m === s.intervalMin }, intervalLabel(m)))),
+          ['blocked', 'partial'].includes(st.lastStatus) ? h('a', { href: s.url, target: '_blank', rel: 'noopener', class: 'fix' }, ' Открыть и пройти проверку →') : null)),
       h('div', { class: 'src-actions' },
+        h('select', { title: 'Как часто искать автоматически', onchange: (e) => update(s.id, { intervalMin: Number(e.target.value) }) },
+          INTERVALS.map((m) => h('option', { value: m, selected: m === s.intervalMin }, intervalLabel(m)))),
         h('button', { type: 'button', class: 'btn small', onclick: async (e) => {
+          const btn = e.currentTarget;
           const r = await send({ type: 'runNow', sourceId: s.id });
-          e.target.textContent = r?.busy ? 'идёт поиск…' : 'ищу…';
+          btn.textContent = r?.busy ? 'занято' : 'ищу…';
+          btn.disabled = true;
         } }, 'Искать'),
-        h('button', { type: 'button', class: 'link muted', onclick: async () => {
-          if (confirm(`Удалить источник «${s.name}»? Найденные вакансии останутся.`)) await store.removeSource(s.id);
+        h('button', { type: 'button', class: 'btn small ghost', title: 'Удалить источник', onclick: async () => {
+          if (!confirm(`Удалить источник «${s.name}»? Найденные вакансии останутся.`)) return;
+          await store.removeSource(s.id);
         } }, 'Удалить')));
   }));
 }
@@ -85,6 +100,10 @@ export function addSourceForm(platform) {
     e.preventDefault();
     const u = toUrl(platform, url.value);
     if (!u) { msg.textContent = 'Не похоже на ссылку. Вставьте адрес страницы целиком.'; return; }
+    if (store.isSingleVacancyUrl(u)) {
+      msg.textContent = 'Это ссылка на одну вакансию, а не на поиск. Добавьте её в профиль как «Пример подходящей вакансии» — по ней найдутся похожие.';
+      return;
+    }
     const detected = store.detectPlatformByUrl(u);
     const p = platform === 'generic' ? detected : platform;
     if (platform !== 'generic' && detected !== platform) { msg.textContent = `Это ссылка не на ${store.PLATFORM_NAMES[platform]}.`; return; }

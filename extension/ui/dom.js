@@ -73,22 +73,10 @@ export function download(name, text, type) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-// Логотипы площадок для плиток и заголовков панелей.
+// Логотипы площадок (SVG из папки img/) для плиток и заголовков панелей.
+const LOGO_FILE = { avito: 'avito', telegram: 'telegram', hh: 'hh', generic: 'https' };
+const LOGO_ALT = { avito: 'Avito', telegram: 'Telegram', hh: 'hh.ru', generic: 'Сайты компаний' };
+
 export function logo(platform, size = 'big') {
-  const cls = `logo logo-${platform} logo-${size}`;
-  if (platform === 'avito') {
-    return h('svg:svg', { class: cls, viewBox: '0 0 100 100', 'aria-hidden': 'true' },
-      h('svg:circle', { cx: 30, cy: 22, r: 10, fill: '#965eeb' }),
-      h('svg:circle', { cx: 68, cy: 28, r: 22, fill: '#00a2ff', stroke: '#fff', 'stroke-width': 2.5 }),
-      h('svg:circle', { cx: 32, cy: 66, r: 28, fill: '#04d95c' }),
-      h('svg:circle', { cx: 74, cy: 74, r: 17, fill: '#f4404f' }));
-  }
-  if (platform === 'telegram') {
-    return h('svg:svg', { class: cls, viewBox: '0 0 100 100', 'aria-hidden': 'true' },
-      h('svg:path', { fill: '#fff', d: 'M8 49c0-3 2-5 5-6l71-29c4-2 8 1 7 6L80 84c-1 4-5 6-9 3L52 72l-9 9c-2 2-5 1-5-2V64l34-31c1-1 0-2-1-1L30 58l-18-6c-3-1-4-2-4-3z' }));
-  }
-  if (platform === 'hh') {
-    return h('div', { class: `${cls} hh-mark` }, h('span', {}, 'hh'));
-  }
-  return h('div', { class: `${cls} sites-mark` }, 'https://');
+  return h('img', { class: `logo logo-${platform} logo-${size}`, src: `img/${LOGO_FILE[platform]}.svg`, alt: LOGO_ALT[platform], draggable: 'false' });
 }

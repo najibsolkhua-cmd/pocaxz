@@ -8,6 +8,7 @@
 //   грейд, зарплата, свежесть.
 
 import { GRADES, resolveSkill, extractSkills, salaryInRub } from './parse.js';
+import { cityMatches } from './geo.js';
 
 export const DEFAULT_PROFILE = {
   name: '',
@@ -21,6 +22,7 @@ export const DEFAULT_PROFILE = {
   cities: [],
   stopWords: [],
   maxAgeDays: 30,
+  examples: [],           // примеры подходящих вакансий: [{ url, title, text }]
 };
 
 // ---------- Текст ----------
@@ -107,9 +109,17 @@ export function makeContext(profile, vacancies = [], resumeText = '') {
   tf(tokens(ps.map((s) => s.name).join(' ')), 2, counts);
   tf(tokens(profile.about), 1, counts);
   tf(tokens(resumeText).slice(0, 3000), 0.5, counts);
+  for (const ex of profile.examples || []) {
+    tf(tokens(ex.title), 2, counts);
+    tf(tokens(ex.text).slice(0, 800), 1, counts);
+  }
 
-  const posTokens = [...new Set(tokens(profile.position))].filter((t) => !GRADE_WORDS.test(t));
-  return { ps, idf, profileVec: counts.size ? vectorize(counts, idf) : null, posTokens };
+  const clean = (t) => [...new Set(tokens(t))].filter((x) => !GRADE_WORDS.test(x));
+  const posTokens = clean(profile.position);
+  // Другие названия должности и названия примеров — тоже «нужная должность».
+  const altTitles = [...(profile.titleKeywords || []), ...(profile.examples || []).map((e) => e.title)]
+    .map(clean).filter((t) => t.length);
+  return { ps, idf, profileVec: counts.size ? vectorize(counts, idf) : null, posTokens, altTitles };
 }
 
 // ---------- Оценка ----------
@@ -163,16 +173,12 @@ export function scoreVacancy(v, profile, now = Date.now(), ctx = makeContext(pro
   }
 
   // --- должность в названии
+  // Доля слов желаемой должности (или любого из её синонимов) в названии вакансии.
   let titleScore = 0.5;
   const titleToks = new Set(tokens(v.title));
-  const kws = (profile.titleKeywords || []).map((k) => k.trim().toLowerCase()).filter(Boolean);
-  if (ctx.posTokens.length) {
-    titleScore = ctx.posTokens.filter((t) => titleToks.has(t)).length / ctx.posTokens.length;
-  }
-  if (kws.length) {
-    const titleL = v.title.toLowerCase();
-    if (kws.some((k) => titleL.includes(k))) titleScore = Math.max(titleScore, 1);
-    else if (!ctx.posTokens.length) titleScore = 0;
+  const variants = [ctx.posTokens, ...(ctx.altTitles || [])].filter((t) => t.length);
+  if (variants.length) {
+    titleScore = Math.max(...variants.map((vt) => vt.filter((t) => titleToks.has(t)).length / vt.length));
   }
 
   // --- грейд
@@ -202,15 +208,17 @@ export function scoreVacancy(v, profile, now = Date.now(), ctx = makeContext(pro
   // Формат/город: штраф, а не фильтр — в тексте формат часто не указан.
   const wantFormats = new Set(profile.formats || []);
   if (v.formats?.length && wantFormats.size && !v.formats.some((f) => wantFormats.has(f))) score *= 0.5;
-  const cities = (profile.cities || []).map((c) => c.toLowerCase()).filter(Boolean);
+  const cities = (profile.cities || []).filter(Boolean);
   const officeOnly = v.formats?.length && !v.formats.includes('remote');
-  if (officeOnly && cities.length && v.location && !cities.some((c) => v.location.toLowerCase().includes(c))) score *= 0.5;
+  if (officeOnly && cities.length && v.location && !cities.some((c) => cityMatches(c, v.location))) score *= 0.5;
 
   return {
     score: Math.round(score * 100) / 100,
     matched,
     missing,
     parts: { skills: skillScore, text: textScore, title: titleScore, grade: gradeScore, salary: salaryScore, fresh },
+    skillsTotal: Math.round(total * 2) / 2,
+    weights: w,
   };
 }
 
