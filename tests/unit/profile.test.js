@@ -77,3 +77,38 @@ test('синонимы должности и пример вакансии по�
   assert.equal(withEx.where, 'title');
   assert.ok(withAlt.score > 0.5 && withEx.score > 0.5, `${withAlt.score} ${withEx.score}`);
 });
+
+test('смена должности меняет её в ссылках hh.ru и Avito', async () => {
+  const db = {};
+  Object.assign(chrome.storage.local, {
+    get: async (k) => (k == null ? { ...db } : Object.fromEntries([k].flat().filter((x) => x in db).map((x) => [x, db[x]]))),
+    set: async (o) => { Object.assign(db, structuredClone(o)); },
+    remove: async (k) => { [k].flat().forEach((x) => delete db[x]); },
+  });
+  db.sources = [
+    { id: 'u1', platform: 'hh', url: 'https://spb.hh.ru/search/vacancy?text=%D0%9C%D0%B0%D1%80%D0%BA%D0%B5%D1%82%D0%BE%D0%BB%D0%BE%D0%B3&salary=100000', enabled: true, intervalMin: 30 },
+    { id: 'u2', platform: 'hh', url: 'https://hh.ru/search/vacancy?text=python', enabled: true, intervalMin: 30 },
+  ];
+  // Первый заход: должность из резюме — сразу появляются поиски hh.ru и Avito.
+  await store.syncAutoSources({ position: 'Маркетолог', titleKeywords: [], cities: ['Санкт-Петербург'] });
+  let src = await store.getSources();
+  // Своя ссылка hh.ru с той же должностью уже есть — дубль не создаём.
+  assert.ok(!src.some((s) => s.auto === 'hh') && src.some((s) => s.auto === 'avito'));
+  assert.ok(src.find((s) => s.auto === 'avito').url.includes(encodeURIComponent('Маркетолог')));
+  db['srcstate:u1'] = { lastFound: 50 };
+  // Сменили должность — в авто-поисках и в своей ссылке с прежней должностью она тоже меняется.
+  await store.syncAutoSources({ position: 'SMM-менеджер', titleKeywords: [], cities: ['Санкт-Петербург'] });
+  src = await store.getSources();
+  const u1 = new URL(src.find((s) => s.id === 'u1').url);
+  assert.equal(u1.searchParams.get('text'), 'SMM-менеджер');
+  assert.equal(u1.searchParams.get('salary'), '100000');
+  assert.equal(src.find((s) => s.id === 'u2').url, 'https://hh.ru/search/vacancy?text=python');
+  assert.ok(new URL(src.find((s) => s.auto === 'avito').url).searchParams.get('q') === 'SMM-менеджер');
+  assert.ok(!('srcstate:u1' in db), 'счётчики старой ссылки сброшены');
+  // Своей ссылки нет — авто-поиск hh.ru создаётся и идёт по новой должности.
+  await store.removeSource('u1');
+  await store.syncAutoSources({ position: 'Таргетолог', titleKeywords: ['Специалист по таргету'], cities: [] });
+  src = await store.getSources();
+  assert.ok(decodeURIComponent(src.find((s) => s.auto === 'hh').url).includes('text=Таргетолог OR "Специалист по таргету"'));
+  assert.equal(new URL(src.find((s) => s.auto === 'avito').url).searchParams.get('q'), 'Таргетолог');
+});

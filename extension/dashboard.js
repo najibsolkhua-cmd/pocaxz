@@ -7,6 +7,7 @@ import { $, h, logo, fmtTime, ago, daysSince, plural, download } from './ui/dom.
 import { createVacancyList } from './ui/vacancies.js';
 import { renderProfile } from './ui/profile.js';
 import { sourceRows, addSourceForm } from './ui/sources.js';
+import { makeZip } from './lib/zip.js';
 
 const send = (msg) => chrome.runtime.sendMessage(msg);
 const PLATFORMS = ['avito', 'generic', 'telegram', 'hh'];
@@ -37,17 +38,42 @@ const matching = (rows) => rows.filter(({ v, s }) => isLive(v) && s.score >= sta
 
 // ---------------- Главная ----------------
 
+// Часы: размеры считаем по реальным контурам цифр (canvas measureText), чтобы время
+// и дата были ровно друг под другом и одной ширины, без «воздуха» по бокам.
+const CLOCK_FONT = '600 100px Manrope';
+const STROKE = 7;
+let clockShown = '';
+function inkBox(ctx, str) {
+  const m = ctx.measureText(str);
+  return { left: m.actualBoundingBoxLeft, right: m.actualBoundingBoxRight, ascent: m.actualBoundingBoxAscent, descent: m.actualBoundingBoxDescent };
+}
+
 function renderClock() {
   const d = new Date();
   const t = d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
-  const text = $('clockText');
-  if (text.textContent !== t || !$('clockSvg').getAttribute('viewBox')) {
-    text.textContent = t;
-    // Подгоняем viewBox под текст, чтобы часы масштабировались целиком.
-    const b = text.getBBox();
-    if (b.width) $('clockSvg').setAttribute('viewBox', `${b.x - 6} ${b.y + b.height * 0.17} ${b.width + 12} ${b.height * 0.72}`);
-  }
-  $('clockDate').textContent = d.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' });
+  const date = d.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' });
+  if (`${t}|${date}` === clockShown) return;
+  const ctx = document.createElement('canvas').getContext('2d');
+  ctx.font = CLOCK_FONT;
+  const tm = inkBox(ctx, t);
+  const dm = inkBox(ctx, date);
+  const half = STROKE / 2;
+  const timeW = tm.left + tm.right + STROKE;
+  const k = timeW / (dm.left + dm.right); // дата растягивается до ширины времени
+  const time = $('clockText');
+  const dt = $('clockDate');
+  time.textContent = t;
+  time.setAttribute('x', tm.left + half);
+  time.setAttribute('y', tm.ascent + half);
+  const timeBottom = tm.ascent + tm.descent + STROKE;
+  const gap = (tm.ascent + tm.descent) * 0.2;
+  dt.textContent = date;
+  dt.style.fontSize = `${100 * k}px`; // style, а не атрибут: атрибут перебивается CSS
+  dt.setAttribute('x', dm.left * k);
+  dt.setAttribute('y', timeBottom + gap + dm.ascent * k);
+  const h = timeBottom + gap + (dm.ascent + dm.descent) * k;
+  $('clockSvg').setAttribute('viewBox', `0 0 ${timeW.toFixed(1)} ${h.toFixed(1)}`);
+  clockShown = `${t}|${date}`;
 }
 
 function renderLimit() {
@@ -395,6 +421,11 @@ function buildSearchDrawer(body) {
     if (!file) return;
     try {
       const data = JSON.parse(await file.text());
+      if (Array.isArray(data.solkJobSources)) {
+        const n = await store.importSources(data.solkJobSources);
+        toast(n ? `Добавлено источников: ${n}` : 'Все источники из файла у вас уже есть');
+        return;
+      }
       if (confirm(`Восстановить ${Object.keys(data).length} записей из копии? Совпадающие данные будут заменены.`)) {
         await chrome.storage.local.set(data);
         toast('Данные восстановлены');
@@ -405,12 +436,13 @@ function buildSearchDrawer(body) {
   body.replaceChildren(
     h('section', { class: 'dsec' }, h('h3', {}, 'Как искать'), settingsForm),
     h('section', { class: 'dsec' }, h('h3', {}, 'Все источники'), srcBox),
+    shareSection(),
     h('section', { class: 'dsec' }, h('h3', {}, 'Данные'),
       h('p', { class: 'muted small' }, 'Всё хранится только в этом браузере. Сделайте резервную копию, если переустанавливаете расширение.'),
       h('div', { class: 'row' },
         h('button', { class: 'btn', type: 'button', onclick: exportCsv }, 'Скачать вакансии (Excel/CSV)'),
         h('button', { class: 'btn', type: 'button', onclick: async () => download(`solk-job-backup-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(await chrome.storage.local.get(null)), 'application/json') }, 'Резервная копия'),
-        h('button', { class: 'btn', type: 'button', onclick: () => importFile.click() }, 'Восстановить из копии'),
+        h('button', { class: 'btn', type: 'button', onclick: () => importFile.click() }, 'Восстановить из копии / добавить источники'),
         importFile),
       h('div', { class: 'danger-zone' },
         h('div', {}, h('b', {}, 'Сбросить статистику'),
@@ -433,6 +465,45 @@ function buildSearchDrawer(body) {
       : [h('tr', {}, h('td', { colspan: 6, class: 'empty' }, 'Поиска ещё не было.'))]));
   };
   drawer.refresh();
+}
+
+// «Поделиться»: у каждого человека своя копия расширения и свои данные.
+// Отдаём установочный архив и, по желанию, свои источники.
+async function downloadExtensionZip(btn) {
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Собираю архив…';
+  try {
+    const list = await (await fetch(chrome.runtime.getURL('files.json'))).json();
+    const files = await Promise.all([...list, 'files.json'].map(async (name) => ({
+      name: `solk-job/${name}`,
+      data: new Uint8Array(await (await fetch(chrome.runtime.getURL(name))).arrayBuffer()),
+    })));
+    const { version } = chrome.runtime.getManifest();
+    download(`solk-job-${version}.zip`, makeZip(files), 'application/zip');
+  } catch (e) {
+    alert(`Не получилось собрать архив: ${e.message}`);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
+  }
+}
+
+function shareSection() {
+  const zipBtn = h('button', { class: 'btn primary', type: 'button', onclick: () => downloadExtensionZip(zipBtn) }, 'Скачать расширение для друга (.zip)');
+  return h('section', { class: 'dsec' }, h('h3', {}, 'Поделиться'),
+    h('p', { class: 'muted small' }, 'Расширение работает в браузере каждого человека: у него будут свои профиль, резюме и вакансии, ваши данные он не увидит. Отправьте ему архив в мессенджере, по почте или ссылкой (Яндекс Диск, Google Drive).'),
+    h('div', { class: 'row' },
+      zipBtn,
+      h('button', { class: 'btn', type: 'button', onclick: async () => {
+        const list = (await store.getSources()).filter((s) => !s.auto).map(({ url, name, platform, intervalMin }) => ({ url, name, platform, intervalMin }));
+        download('solk-job-sources.json', JSON.stringify({ solkJobSources: list }, null, 1), 'application/json');
+      } }, 'Скачать мои источники')),
+    h('ol', { class: 'steps small' },
+      h('li', {}, 'Другу: распаковать архив — появится папка «solk-job».'),
+      h('li', {}, 'Открыть browser://extensions (Яндекс Браузер) или chrome://extensions (Chrome), включить «Режим разработчика».'),
+      h('li', {}, 'Нажать «Загрузить распакованное расширение» и выбрать папку «solk-job».'),
+      h('li', {}, 'Загрузить своё резюме — ссылки hh.ru и Avito настроятся сами. Ваши источники: «Данные» → «Восстановить из копии / добавить источники» → файл solk-job-sources.json.')));
 }
 
 function exportCsv() {
@@ -558,9 +629,27 @@ function bind() {
   chrome.storage.onChanged.addListener((_c, area) => { if (area === 'local') scheduleRefresh(); });
 }
 
+// Доступ ко всем сайтам: если браузер выдал его только «по клику», просим разрешить.
+const ALL_SITES = ['https://*/*', 'http://*/*'];
+async function checkAccess() {
+  const ok = await chrome.permissions.contains({ origins: ALL_SITES }).catch(() => true);
+  $('accessBar').hidden = ok;
+}
+$('accessBtn').addEventListener('click', async () => {
+  const ok = await chrome.permissions.request({ origins: ALL_SITES }).catch(() => false);
+  if (ok) toast('Доступ разрешён — нажмите «/ Найти работу»');
+  else toast('Браузер не дал доступ. Откройте настройки расширения → «Доступ к сайтам» → «На всех сайтах».');
+  checkAccess();
+});
+chrome.permissions.onAdded?.addListener(checkAccess);
+chrome.permissions.onRemoved?.addListener(checkAccess);
+
 bind();
+checkAccess();
 await store.ensureProfiles();
 renderClock();
+// Шрифт подгружается не сразу — после загрузки пересчитываем размеры часов.
+document.fonts.load(CLOCK_FONT).then(() => { clockShown = ''; renderClock(); });
 setInterval(renderClock, 5000);
 await loadState();
 renderHome();

@@ -8,6 +8,10 @@
   <link rel="stylesheet" href="ui.css">
 </head>
 <body class="app">
+  <div class="access-bar" id="accessBar" hidden>
+    <span>Браузер не дал расширению доступ к сайтам — вакансии с сайтов компаний, hh.ru и Avito не будут читаться.</span>
+    <button type="button" class="btn" id="accessBtn">Разрешить доступ</button>
+  </div>
   <main class="home" id="home">
     <!-- Источники -->
     <button class="tile t-src t-avito" data-open="avito" type="button">
@@ -41,11 +45,12 @@
     <!-- Центральная плитка -->
     <section class="tile t-main" id="mainTile">
       <div class="main-top">
-        <div class="clock">
-          <!-- SVG: обводка рисуется под заливкой (paint-order), поэтому контур ровный, без артефактов -->
-          <svg class="time" id="clockSvg" aria-hidden="true"><text id="clockText" x="0" y="0" fill="#b81400" stroke="#fff" stroke-width="7" stroke-linejoin="round" paint-order="stroke">00:00</text></svg>
-          <div class="date" id="clockDate"></div>
-        </div>
+        <!-- Время и дата в одной SVG: одинаковая ширина и общий левый край.
+             Обводка времени рисуется под заливкой (paint-order) — контур ровный. -->
+        <svg class="clock" id="clockSvg" aria-hidden="true">
+          <text id="clockText" fill="#b81400" stroke="#fff" stroke-width="7" stroke-linejoin="round" paint-order="stroke">00:00</text>
+          <text id="clockDate" fill="#fff">01.01.2026</text>
+        </svg>
         <img class="brand" src="img/solk-job.svg" alt="solk / job" draggable="false">
       </div>
       <button class="who" id="who" type="button" data-open="profile">
@@ -65,7 +70,7 @@
             <span class="find-fill" id="findFill"></span>
             <span class="find-text" id="findText">/ Найти работу</span>
           </button>
-          <button class="stop" id="stopBtn" type="button" hidden title="Остановить поиск — найденное сохранится">■ Стоп</button>
+          <button class="stop" id="stopBtn" type="button" hidden title="Остановить поиск — найденное сохранится"><span class="sq"></span>Стоп</button>
         </div>
       </div>
     </section>

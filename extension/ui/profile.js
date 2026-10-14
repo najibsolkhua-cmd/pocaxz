@@ -100,6 +100,7 @@ export async function renderProfile(container, { onSaved, onSwitched } = {}) {
   const p = await store.getProfile();
   let resume = await store.getResume();
   let dirty = false;
+  let savedPosition = (p.position || '').trim();
   const savedMsg = h('span', { class: 'muted' });
   const saveBar = h('div', { class: 'savebar' }, h('button', { type: 'submit', class: 'btn primary' }, 'Сохранить профиль'), savedMsg);
   const markDirty = () => { dirty = true; saveBar.classList.add('dirty'); savedMsg.textContent = 'Есть несохранённые изменения'; };
@@ -107,7 +108,8 @@ export async function renderProfile(container, { onSaved, onSwitched } = {}) {
   // --- поля
   const f = {
     name: h('input', { value: p.name || '', placeholder: 'Как к вам обращаться', oninput: markDirty }),
-    position: h('input', { value: p.position || '', placeholder: 'Например: Маркетолог', oninput: () => { markDirty(); drawSuggest(); } }),
+    // Должность сохраняем сразу, как только поле теряет фокус: ссылки hh.ru и Avito меняются вместе с ней.
+    position: h('input', { value: p.position || '', placeholder: 'Например: Маркетолог', oninput: () => { markDirty(); drawSuggest(); }, onchange: () => { if (f.position.value.trim() !== savedPosition) save(); } }),
     about: h('textarea', { rows: 5, placeholder: 'Чем вы занимаетесь: задачи, продукты, отрасли, результаты. Этот текст сравнивается с каждой вакансией.', oninput: markDirty }, p.about || ''),
     salary: h('input', { type: 'number', min: 0, step: 10000, value: p.minSalary || '', placeholder: '100000', oninput: markDirty }),
     age: h('input', { type: 'number', min: 1, max: 90, value: p.maxAgeDays || 30, oninput: markDirty }),
@@ -236,8 +238,9 @@ export async function renderProfile(container, { onSaved, onSwitched } = {}) {
       h('button', { type: 'button', class: 'link', onclick: async () => { await store.saveResume(null); resume = null; foundBox.replaceChildren(); drawResume(); } }, 'Удалить'));
   }
 
-  // Заполняем форму из резюме. Ничего не сохраняем — вы проверяете и жмёте «Сохранить».
-  function autofill() {
+  // Заполняем форму из резюме и сразу сохраняем: поиски hh.ru и Avito
+  // тут же настраиваются на должность из резюме. Поправить можно в любой момент.
+  async function autofill() {
     if (!resume) return;
     const r = profileFromResume(resume.text);
     const filled = [];
@@ -252,11 +255,11 @@ export async function renderProfile(container, { onSaved, onSwitched } = {}) {
     if (r.cities.length) { cities.add(r.cities.join(',')); filled.push('город'); }
     drawSuggest();
     foundBox.replaceChildren();
+    if (filled.length) await save();
     autoMsg.hidden = false;
     autoMsg.textContent = filled.length
-      ? `Заполнено из резюме: ${filled.join(', ')}. Проверьте, поправьте при необходимости и нажмите «Сохранить профиль».`
+      ? `Заполнено из резюме и сохранено: ${filled.join(', ')}.${f.position.value.trim() ? ` Поиск «${f.position.value.trim()}» на hh.ru и Avito уже настроен.` : ''} Поправьте, если что-то не так.`
       : 'В резюме не нашлось полей для профиля — заполните вручную.';
-    markDirty();
   }
 
   async function takeFile(file) {
@@ -302,6 +305,7 @@ export async function renderProfile(container, { onSaved, onSwitched } = {}) {
       examples,
     };
     await store.saveProfile(profile);
+    savedPosition = profile.position;
     const changed = await store.syncAutoSources(profile);
     dirty = false;
     saveBar.classList.remove('dirty');

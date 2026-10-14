@@ -91,6 +91,8 @@ async function runQueue(due, settings) {
     running = false;
     current = null;
     progress = { ...progress, current: null, queue: [], finishedAt: new Date().toISOString(), stopped: stopRequested };
+    // После «Стоп» автопоиск не продолжается через 5 минут: каждый источник ждёт свой интервал.
+    if (stopRequested) await rescheduleAll().catch(console.error);
     stopRequested = false;
     currentHandle = null;
     stop();
@@ -218,9 +220,21 @@ async function fetchDetails(tabId, platform, list) {
   return { results, blocked: null };
 }
 
+// Есть ли у расширения доступ к сайту. В Яндекс Браузере и Chrome пользователь может
+// ограничить доступ «по клику» — тогда сайты не читаются, пока не нажать «Разрешить».
+async function hasAccess(url) {
+  try { return await chrome.permissions.contains({ origins: [`${new URL(url).origin}/*`] }); } catch { return false; }
+}
+const NO_ACCESS = (url) => `Нет доступа к сайту ${new URL(url).hostname}. На главной нажмите «Разрешить доступ» (или в настройках расширения: «Доступ к сайтам» → «На всех сайтах»).`;
+
 async function runSource(src, settings) {
   const started = new Date();
   const st = await store.getSrcState(src.id);
+  if (!(await hasAccess(src.url))) {
+    await store.setSrcState(src.id, { ...st, lastRunAt: started.toISOString(), nextRunAt: new Date(Date.now() + src.intervalMin * 60e3).toISOString(), lastStatus: 'failed', lastError: NO_ACCESS(src.url), failures: (st.failures || 0) + 1 });
+    await store.addRun({ at: started.toISOString(), source: src.name, sourceId: src.id, platform: src.platform, status: 'failed', found: 0, added: 0, error: NO_ACCESS(src.url), ms: 0 });
+    return { status: 'failed', found: 0, added: 0 };
+  }
   const limit = Math.max(1, Math.min(Number(settings.scanLimit) || 100, 5000));
   const collected = new Map();
   let total = null;
@@ -240,7 +254,16 @@ async function runSource(src, settings) {
 
     // 1. Страницы выдачи — пока не наберём лимит или выдача не кончится.
     for (;;) {
-      const res = await extractInTab(handle.tabId, { platform: src.platform, ...src.cfg, limit: limit - collected.size, pageNo: pages });
+      const cfg = { platform: src.platform, ...src.cfg, limit: limit - collected.size, pageNo: pages };
+      let res = await extractInTab(handle.tabId, cfg);
+      // Пустая страница без капчи — чаще всего сайт не успел догрузиться. Пробуем ещё раз.
+      if (!res.items?.length && !res.blocked && !stopRequested) {
+        await sleep(rand(2500, 4500));
+        try {
+          await navigate(handle.tabId, url);
+          res = await extractInTab(handle.tabId, { ...cfg, waitMs: 5000 });
+        } catch { /* оставляем первый результат */ }
+      }
       pages++;
       if (pages === 1) total = res.total;
       if (res.error && !res.items?.length) error = res.error;
@@ -252,7 +275,11 @@ async function runSource(src, settings) {
       if (stopRequested || collected.size >= limit || collected.size === before || !res.nextUrl || pages >= MAX_PAGES) break;
       url = res.nextUrl;
       await sleep(rand(...PAGE_DELAY[src.platform]));
-      try { await navigate(handle.tabId, url); } catch (e) { error = String(e?.message || e); break; }
+      try { await navigate(handle.tabId, url); } catch {
+        // Сеть моргнула — ещё одна попытка, потом сдаёмся и сохраняем собранное.
+        await sleep(rand(3000, 6000));
+        try { await navigate(handle.tabId, url); } catch (e) { error = String(e?.message || e); break; }
+      }
     }
 
     const items = [...collected.values()];
@@ -302,7 +329,18 @@ async function runSource(src, settings) {
     }
   } catch (e) {
     // Вкладку закрыли по кнопке «Стоп» — это не ошибка.
-    if (!stopRequested) error = String(e?.message || e);
+    if (!stopRequested) {
+      error = String(e?.message || e);
+      if (/must request permission|Cannot access contents/i.test(error)) {
+        // Доступ есть, а страница не читается — значит, она не загрузилась (страница ошибки
+        // браузера) или ушла на другой адрес. Иначе — доступ к сайту действительно закрыт.
+        const tab = handle ? await chrome.tabs.get(handle.tabId).catch(() => null) : null;
+        const at = tab?.url || src.url;
+        error = /^https?:/i.test(at) && (await hasAccess(at))
+          ? `Страница ${new URL(src.url).hostname} не открылась или ушла на другой адрес. Откройте ссылку вручную: если сайт работает, повторите поиск.`
+          : NO_ACCESS(/^https?:/i.test(at) ? at : src.url);
+      }
+    }
   } finally {
     handle?.close();
   }
@@ -357,6 +395,17 @@ async function runSource(src, settings) {
     ms: Date.now() - started.getTime(),
   });
   return { status, ...stats };
+}
+
+async function rescheduleAll() {
+  const now = Date.now();
+  const patch = {};
+  const all = await store.getAll();
+  for (const s of await store.getSources()) {
+    const st = all[`srcstate:${s.id}`] || {};
+    patch[`srcstate:${s.id}`] = { ...st, nextRunAt: new Date(now + s.intervalMin * 60e3).toISOString() };
+  }
+  if (Object.keys(patch).length) await chrome.storage.local.set(patch);
 }
 
 async function markArchived(platform, externalId) {

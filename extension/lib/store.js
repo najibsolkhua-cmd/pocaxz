@@ -36,7 +36,7 @@ export const DEFAULT_SETTINGS = {
   retentionDays: 45,       // удалять старые вакансии, которые вы не трогали
   manualEnrichMax: 10,     // сколько описаний подгружать при сборе с текущей вкладки
   scanLimit: 100,          // сколько вакансий собирать с одного источника за поиск
-  deepCheck: 20,           // у скольких лучших новых вакансий открывать полное описание
+  deepCheck: 30,           // у скольких лучших новых вакансий открывать полное описание
   pauseBetweenSources: [8000, 20000], // пауза между источниками, мс
 };
 
@@ -266,12 +266,51 @@ export function autoSearchUrl(platform, profileOrQuery) {
   return null;
 }
 
+// Ссылка поиска, набранная пользователем, «про прежнюю должность»?
+function queryOf(url) {
+  try {
+    const u = new URL(url);
+    const key = /hh\.ru$/.test(u.hostname) ? 'text' : /avito\.ru$/.test(u.hostname) ? 'q' : null;
+    return key ? { u, key, q: (u.searchParams.get(key) || '').trim() } : null;
+  } catch { return null; }
+}
+const normQ = (q) => q.toLowerCase().replace(/["«»]/g, '').replace(/\s+/g, ' ').trim();
+
+// Подменяем должность в ссылке поиска, остальные фильтры (город, зарплата…) не трогаем.
+export function retargetSearchUrl(url, platform, profile, prevPosition) {
+  const info = queryOf(url);
+  if (!info || !prevPosition) return null;
+  const prev = { position: prevPosition };
+  const olds = new Set([prevPosition, ...titleVariants(prevPosition), hhQuery(prev)].map(normQ));
+  if (!info.q || !olds.has(normQ(info.q))) return null;
+  const next = platform === 'hh' ? hhQuery({ ...profile, titleKeywords: [] }) || profile.position : titleVariants(profile.position)[0] || profile.position;
+  if (normQ(next) === normQ(info.q)) return null;
+  info.u.searchParams.set(info.key, next);
+  return info.u.toString();
+}
+
+// Создаём/обновляем поиски hh.ru и Avito по должности. Если должность сменилась —
+// меняем её и во всех ссылках hh/Avito, где стояла прежняя должность.
 export async function syncAutoSources(profile) {
   const query = (profile.position || '').trim();
   const sources = await getSources();
-  const { autoRemoved } = await local.get('autoRemoved');
-  const removed = new Set(autoRemoved || []);
+  const before = new Map(sources.map((s) => [s.id, s.url]));
+  const { autoRemoved, autoPosition } = await local.get(['autoRemoved', 'autoPosition']);
+  const prevPosition = (autoPosition || '').trim();
+  const positionChanged = Boolean(query) && normQ(prevPosition) !== normQ(query);
+  // Новая должность — предлагаем авто-поиски заново, даже если прежние удаляли.
+  const removed = new Set(positionChanged ? [] : autoRemoved || []);
   let changed = false;
+  if (positionChanged) {
+    sources.forEach((s, i) => {
+      if (s.auto || (s.platform !== 'hh' && s.platform !== 'avito')) return;
+      const url = retargetSearchUrl(s.url, s.platform, profile, prevPosition);
+      if (!url) return;
+      sources[i] = { ...s, url, name: sourceName(url, s.platform) };
+      changed = true;
+    });
+    await local.set({ autoPosition: query, autoRemoved: [] });
+  }
   for (const platform of ['hh', 'avito']) {
     const idx = sources.findIndex((s) => s.auto === platform);
     if (!query) continue;
@@ -279,17 +318,42 @@ export async function syncAutoSources(profile) {
     const name = sourceName(url, platform);
     if (idx >= 0) {
       if (sources[idx].url !== url) {
-        sources[idx] = { ...sources[idx], url, name };
-        await local.remove(`srcstate:${sources[idx].id}`);
+        sources[idx] = { ...sources[idx], url, name, ...(positionChanged ? { enabled: true } : {}) };
         changed = true;
       }
     } else if (!removed.has(platform)) {
-      sources.push({ ...makeSource(url, { platform, name }), auto: platform });
-      changed = true;
+      // Пользователь уже добавил свою ссылку с этой должностью — дубль не нужен.
+      const own = sources.find((s) => s.platform === platform && !s.auto && normQ(queryOf(s.url)?.q || '') === normQ(platform === 'hh' ? hhQuery(profile) : titleVariants(query)[0] || query));
+      if (!own) {
+        sources.push({ ...makeSource(url, { platform, name }), auto: platform });
+        changed = true;
+      }
     }
   }
-  if (changed) await saveSources(sources);
+  if (changed) {
+    await saveSources(sources);
+    // Ссылки поменялись — прежние счётчики «на сайте/собрано» уже не про них.
+    const moved = sources.filter((s) => !before.has(s.id) || before.get(s.id) !== s.url).map((s) => `srcstate:${s.id}`);
+    if (moved.length) await local.remove(moved);
+  }
   return changed;
+}
+
+// Источники из файла другого человека: добавляем те, которых ещё нет.
+export async function importSources(list) {
+  const sources = await getSources();
+  const have = new Set(sources.map((s) => s.url));
+  let added = 0;
+  for (const x of list || []) {
+    if (!x?.url || !/^https?:\/\//i.test(x.url)) continue;
+    const src = makeSource(x.url, { platform: x.platform, name: x.name });
+    if (have.has(src.url)) continue;
+    have.add(src.url);
+    sources.push({ ...src, intervalMin: Number(x.intervalMin) || src.intervalMin });
+    added++;
+  }
+  if (added) await saveSources(sources);
+  return added;
 }
 
 export async function removeSource(id) {

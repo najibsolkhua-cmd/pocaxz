@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import assert from 'node:assert/strict';
-import { execSync } from 'node:child_process';
+import { execSync, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
@@ -141,6 +141,11 @@ try {
     assert.ok(await d.locator('.seg button.on', { hasText: 'Middle' }).count(), 'грейд Middle по стажу 4 года');
     const cities = await d.locator('.field', { hasText: 'Города' }).locator('.chip.edit').allTextContents();
     assert.ok(cities.some((c) => c.includes('Москва')), `город: ${cities}`);
+    // Профиль из резюме сохраняется сам — поиски hh.ru и Avito по должности появляются сразу.
+    await until(async () => (await storage(page)).sources?.some((x) => x.auto === 'avito'), 5000, 'автопоиски после резюме');
+    const st = await storage(page);
+    assert.ok(decodeURIComponent(st.sources.find((x) => x.auto === 'hh').url).includes('Python backend-разработчик'));
+    assert.equal(st.profile.position, 'Python backend-разработчик');
   });
 
   await step('кнопка «Заполнить профиль из резюме» и похожие должности', async () => {
@@ -203,14 +208,34 @@ try {
     assert.ok(all.sources.find((x) => x.auto === 'avito').url.includes('/moskva/'));
   });
 
+  await step('смена должности сразу меняет её в ссылках hh.ru и Avito', async () => {
+    const pos = d.locator('.field', { hasText: 'Желаемая должность' }).locator('input');
+    const urls = async () => {
+      const { sources } = await storage(page);
+      return { hh: decodeURIComponent(sources.find((x) => x.auto === 'hh').url), avito: new URL(sources.find((x) => x.auto === 'avito').url).searchParams.get('q') };
+    };
+    await pos.fill('Go-разработчик');
+    await pos.blur();
+    await until(async () => (await urls()).avito === 'Go-разработчик', 5000, 'Avito: новая должность');
+    assert.ok((await urls()).hh.includes('text=Go-разработчик'), (await urls()).hh);
+    await d.locator('.savebar .muted', { hasText: 'hh.ru и Avito обновлён' }).waitFor();
+    await pos.fill('Python backend-разработчик');
+    await pos.blur();
+    await until(async () => (await urls()).avito === 'Python backend-разработчик', 5000, 'Avito: должность вернулась');
+    assert.ok((await urls()).hh.includes('Python-разработчик'), 'синонимы снова в запросе hh');
+  });
+
   await step('главная: имя, должность, часы, лимит', async () => {
     await page.locator('.drawer-close').click();
     await until(() => page.evaluate(() => !document.querySelector('.drawer.open')), 3000, 'закрытие панели');
     // Главная обновляется по изменению хранилища (не чаще раза в секунду).
     await until(async () => (await page.locator('#whoName').textContent()) === 'Иван', 4000, 'имя на главной');
-    assert.equal(await page.locator('#whoPosition').textContent(), 'Python backend-разработчик');
+    await until(async () => (await page.locator('#whoPosition').textContent()) === 'Python backend-разработчик', 4000, `должность на главной: ${await page.locator('#whoPosition').textContent()}`);
     assert.match(await page.locator('#clockText').textContent(), /^\d\d:\d\d$/);
     assert.ok(await page.locator('#clockSvg').getAttribute('viewBox'), 'у часов подогнан viewBox');
+    const [tw, dw] = await page.evaluate(() => ['clockText', 'clockDate'].map((id) => document.getElementById(id).getBBox().width));
+    assert.ok(Math.abs(tw - dw) / tw < 0.08, `время и дата одной ширины: ${tw} / ${dw}`);
+    assert.ok(await page.locator('#accessBar').isHidden(), 'доступ к сайтам есть — плашки нет');
     assert.ok(await page.locator('.limit button.on', { hasText: '100' }).count(), 'по умолчанию 100');
     await page.locator('#limitInput').fill('250');
     await page.locator('#limitInput').press('Enter');
@@ -412,6 +437,11 @@ try {
     await until(() => page.locator('#stopBtn').isHidden(), 5000, 'кнопка «Стоп» скрылась');
     const st = await storage(page);
     assert.ok(Object.keys(st).some((k) => k.startsWith('srcstate:') && st[k].lastStatus === 'stopped'), 'источник помечен «остановлено»');
+    // После «Стоп» следующий поиск у каждого источника — не раньше его интервала.
+    for (const s of st.sources.filter((x) => x.enabled)) {
+      const next = Date.parse(st[`srcstate:${s.id}`]?.nextRunAt || 0);
+      assert.ok(next > Date.now() + s.intervalMin * 60e3 * 0.8, `${s.name}: следующий поиск через интервал (${st[`srcstate:${s.id}`]?.nextRunAt})`);
+    }
     await page.evaluate(async () => {
       const { settings } = await chrome.storage.local.get('settings');
       await chrome.storage.local.set({ settings: { ...settings, scanLimit: 100 } });
@@ -469,6 +499,22 @@ try {
     await page.waitForTimeout(600);
     await page.screenshot({ path: path.join(shotsEarly, 'home.png') });
   }
+
+  await step('«Поделиться»: архив расширения для другого человека', async () => {
+    await page.evaluate(() => { location.hash = 'search'; });
+    await page.waitForSelector('.drawer.open .danger-zone');
+    const [dl] = await Promise.all([page.waitForEvent('download'), page.locator('button', { hasText: 'Скачать расширение для друга' }).click()]);
+    assert.match(dl.suggestedFilename(), /^solk-job-\d+\.\d+\.\d+\.zip$/);
+    const zipPath = await dl.path();
+    const py = 'import sys,zipfile,json;z=zipfile.ZipFile(sys.argv[1]);assert z.testzip() is None;n=z.namelist();print(len(n));print(json.loads(z.read("solk-job/manifest.json"))["name"])';
+    const [count, name] = execFileSync('python3', ['-I', '-c', py, zipPath], { encoding: 'utf8' }).trim().split('\n');
+    const expected = JSON.parse(fs.readFileSync(new URL('../../extension/files.json', import.meta.url), 'utf8')).length + 1;
+    assert.equal(Number(count), expected, 'в архиве все файлы расширения');
+    assert.equal(name, 'solk / job');
+    const [src] = await Promise.all([page.waitForEvent('download'), page.locator('button', { hasText: 'Скачать мои источники' }).click()]);
+    const shared = JSON.parse(fs.readFileSync(await src.path(), 'utf8'));
+    assert.ok(Array.isArray(shared.solkJobSources) && shared.solkJobSources.length && shared.solkJobSources.every((x) => x.url && !('id' in x)));
+  });
 
   await step('сброс статистики — только после двух подтверждений', async () => {
     await page.evaluate(() => { location.hash = 'search'; });
