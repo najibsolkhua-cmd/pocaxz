@@ -5,6 +5,7 @@
 import * as store from './lib/store.js';
 import { normalizeItem, dedupKey } from './lib/parse.js';
 import { scoreAll } from './lib/match.js';
+import { siteApiFor, readSiteApi } from './lib/sites.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const rand = (a, b) => a + Math.random() * (b - a);
@@ -312,6 +313,19 @@ async function viaOffscreen(type, url, cfg = {}) {
   return (await abortable(chrome.runtime.sendMessage({ target: 'offscreen', type, url, cfg }))) || { fail: 'пустой ответ' };
 }
 
+// API сайта: POST с JSON, с куками сайта (у расширения есть доступ к нему).
+async function fromSiteApi(api, pageUrl) {
+  const key = `siteApi:${api.id}`;
+  const known = (await chrome.storage.local.get(key))[key];
+  const fetchJson = async (endpoint, body) => {
+    const r = await fetch(endpoint, { method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json', accept: 'application/json' }, body: JSON.stringify(body) });
+    return r.ok ? r.json() : null;
+  };
+  const r = await abortable(readSiteApi(api, pageUrl, fetchJson, known)).catch((e) => { if (e instanceof Stopped) throw e; return null; });
+  if (r && r.variant !== known) await chrome.storage.local.set({ [key]: r.variant });
+  return r;
+}
+
 // После «Найти» на сайте: ждём перехода на страницу результатов (или перерисовки списка).
 function settleAfterSubmit(tabId) {
   return abortable(new Promise((resolve) => {
@@ -421,7 +435,19 @@ async function runSource(src, settings, quota = settings.scanLimit) {
           guarded = true;
         }
       }
-      if (mode === 'fetch') {
+      // Сайт рисует список скриптом из своего API (например, T-Банк) — берём вакансии из API:
+      // в «Защищённом режиме» сразу, во вкладке — если на странице ничего не нашлось.
+      const api = pages === 0 && src.platform === 'generic' ? siteApiFor(url, src.cfg) : null;
+      if (api && (mode === 'fetch' || !res?.items?.length)) {
+        const r = await fromSiteApi(api, url);
+        if (r?.items.length) {
+          if (handle) { handle.close(); handle = null; currentHandle = null; }
+          res = { items: r.items, total: r.total, nextUrl: null };
+          mode = 'fetch';
+          fillInfo = { query: null, city: null, via: 'API сайта' };
+        }
+      }
+      if (mode === 'fetch' && !res?.items?.length) {
         if (handle) { handle.close(); handle = null; currentHandle = null; }
         res = await viaOffscreen('parse', url, cfg);
         if (res.fail) { error = `не удалось скачать страницу: ${res.fail}`; break; }

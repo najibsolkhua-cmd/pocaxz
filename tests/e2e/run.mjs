@@ -58,6 +58,17 @@ function route(url) {
 const hits = [];
 const server = http.createServer((req, res) => {
   hits.push(req.url);
+  // API сайта карьеры (как у T-Банка): POST с JSON, отвечает только на правильный запрос.
+  if (req.url.startsWith('/pfpjobs/papi/getVacancies')) {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      const ok = req.method === 'POST' && body.includes('"T_CAREER"') && body.includes('"generatedGraphQL"');
+      res.writeHead(ok ? 200 : 400, { 'content-type': 'application/json' });
+      res.end(ok ? fx('tbank-api.json') : '{"error":"bad request"}');
+    });
+    return;
+  }
   // Очень медленный сайт: страница грузится 25 секунд (проверка мгновенного «Стоп»).
   if (req.url.startsWith('/slow')) {
     setTimeout(() => { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); res.end('<!doctype html><meta charset="utf-8"><p>долго</p>'); }, 25000);
@@ -254,13 +265,13 @@ try {
     assert.ok((await page.locator('#searchTile').textContent()).includes('включится после первого поиска'), 'до первого поиска автопоиск не запускается');
     // «/ поддержка» — ссылка на Telegram, по центру строки со временем.
     assert.equal(await page.locator('#supportLink').getAttribute('href'), 'https://t.me/max_max3700');
+    // Середина надписи «solk» в логотипе: 51.9…157.6 из высоты SVG 126.36 (верх 44.98).
     const m = await page.evaluate(() => {
       const sup = document.getElementById('supportLink').getBoundingClientRect();
-      const clk = document.getElementById('clockSvg').getBoundingClientRect();
-      const frac = Number(getComputedStyle(document.getElementById('mainTile')).getPropertyValue('--time-frac'));
-      return { supMid: (sup.top + sup.bottom) / 2, timeMid: clk.top + (clk.height * frac) / 2, frac };
+      const brand = document.querySelector('.brand').getBoundingClientRect();
+      return { supMid: (sup.top + sup.bottom) / 2, solkMid: brand.top + brand.height * ((51.9 + 157.6) / 2 - 44.98) / 126.36 };
     });
-    assert.ok(m.frac > 0.3 && Math.abs(m.supMid - m.timeMid) < 4, `поддержка по центру строки со временем: ${JSON.stringify(m)}`);
+    assert.ok(Math.abs(m.supMid - m.solkMid) < 3, `«/ поддержка» на одной линии с «solk»: ${JSON.stringify(m)}`);
     assert.ok(await page.locator('.limit button.on', { hasText: '100' }).count(), 'по умолчанию 100');
     await page.locator('#limitInput').fill('250');
     await page.locator('#limitInput').press('Enter');
@@ -537,9 +548,9 @@ try {
     await page.evaluate(async (b) => {
       const { sources } = await chrome.storage.local.get('sources');
       const mk = (id, name, url, cfg = {}) => ({ id, platform: 'generic', name, url, intervalMin: 360, enabled: false, cfg });
-      await chrome.storage.local.set({ sources: [...sources, mk('hr', 'Тополь: поиск', `${b}/hr`), mk('board', 'Доска', `${b}/board?query=%D0%BF%D0%BE%D0%B2%D0%B0%D1%80&page=1`), mk('spa', 'Банк: карьера', `${b}/spa`, { fetchMode: true })] });
+      await chrome.storage.local.set({ sources: [...sources, mk('hr', 'Тополь: поиск', `${b}/hr`), mk('board', 'Доска', `${b}/board?query=%D0%BF%D0%BE%D0%B2%D0%B0%D1%80&page=1`), mk('spa', 'Банк: карьера', `${b}/spa`, { fetchMode: true }), mk('tb', 'Т-Банк', `${b}/career/vacancies/all/saint-petersburg/?searchQuery=x`, { fetchMode: true, api: 'tbank' })] });
     }, base);
-    for (const id of ['hr', 'board', 'spa']) {
+    for (const id of ['hr', 'board', 'spa', 'tb']) {
       await page.evaluate((x) => chrome.runtime.sendMessage({ type: 'runNow', sourceId: x }), id);
       await waitIdle(page);
     }
@@ -560,6 +571,15 @@ try {
     const py = spa.find((x) => x.title === 'Python backend-разработчик');
     assert.ok(py.url.endsWith('/spa/vacancy/9001') && py.company === 'Банк Ромашка' && py.salary?.from === 250000, JSON.stringify(py));
     assert.equal(st['srcstate:spa'].lastStatus, 'ok');
+    // Сайт в «Защищённом режиме» (T-Банк): вакансии — прямо из API сайта, без вкладки и без настроек.
+    const tb = Object.values(st).filter((x) => x?.key?.startsWith('v:generic:') && (x.sources || []).includes('Т-Банк'));
+    assert.equal(tb.length, 3, `tbank: ${tb.map((x) => x.title)}`);
+    const tbPy = tb.find((x) => /python/i.test(x.title));
+    assert.equal(tbPy.location, 'Москва');
+    assert.ok(tbPy.url.endsWith('/career/it/vacancy/moscow/python-backend/'), tbPy.url);
+    assert.equal(st['srcstate:tb'].lastStatus, 'ok');
+    assert.equal(st['srcstate:tb'].filled?.via, 'API сайта');
+    assert.equal(typeof st['siteApi:tbank'], 'number', 'рабочий вариант запроса запомнен');
     // В панели «Сайты компаний» видно, что подставлено, и есть переключатель.
     await page.evaluate(() => { location.hash = 'generic'; });
     await page.locator('.drawer.open .src-fill', { hasText: 'Подставлено в поля сайта' }).waitFor();

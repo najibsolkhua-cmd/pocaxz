@@ -1,0 +1,5 @@
+{"resultCode":"OK","payload":{"total":3,"vacancies":[
+{"id":"a1","title":"Python backend-разработчик","subtitle":"Москва","url":"/career/it/vacancy/moscow/python-backend/","tags":["Гибрид","Полная занятость"],"description":"<p>FastAPI, PostgreSQL, Kafka, Docker.</p>"},
+{"id":"a2","title":"Маркетолог","subtitle":"Санкт-Петербург","urlSlug":"marketolog","tags":[{"name":"Офис"}]},
+{"id":"a3","title":"Представитель","subtitle":"Санкт-Петербург","description":"Доставляйте продукты банка"}
+]}}

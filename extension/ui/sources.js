@@ -57,6 +57,7 @@ function stateLine(st) {
 function fillLine(s, st) {
   if (s.platform !== 'generic' || s.autoFill === false || !st.filled) return null;
   const f = st.filled;
+  if (f.via === 'API сайта') return h('div', { class: 'src-fill' }, 'Вакансии взяты напрямую из API сайта (браузер не пускает расширение на страницу) — весь список, отобран по вашему профилю.');
   const what = [f.query ? h('span', {}, 'должность ', h('b', {}, `«${f.query}»`)) : null, f.city ? h('span', {}, `${f.query ? ', ' : ''}город `, h('b', {}, f.city)) : null].filter(Boolean);
   if (!what.length) return null;
   return h('div', { class: 'src-fill' }, `Подставлено ${f.via === 'ссылка' ? 'в ссылку' : 'в поля сайта'}: `, ...what, '. Проверьте, что сайт понял правильно.', f.note ? ` (${f.note})` : '');
