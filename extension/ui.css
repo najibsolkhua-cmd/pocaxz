@@ -116,12 +116,9 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .logo-slot { flex: 1; display: flex; align-items: center; justify-content: center; min-height: 0; padding: 4px 0; }
 .t-src .sub { font-size: 13px; font-weight: 500; opacity: .9; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .logo { display: block; object-fit: contain; user-select: none; }
-.logo-big { height: 44cqh; width: auto; max-width: 70cqw; }
-.logo-big.logo-telegram { height: 38cqh; }
-.logo-big.logo-hh { height: 50cqh; }
-.logo-big.logo-generic { height: auto; width: min(64cqw, 240px); }
-.logo-small { height: 30px; width: auto; flex: none; }
-.logo-small.logo-generic { height: 18px; }
+/* Все логотипы нарисованы на одном холсте 180×173, поэтому размер у всех один — так они визуально равны. */
+.logo-big { height: 62cqh; width: auto; aspect-ratio: 180.47 / 172.99; }
+.logo-small { height: 34px; width: auto; aspect-ratio: 180.47 / 172.99; flex: none; }
 
 /* Центральная плитка: все размеры от высоты плитки, чтобы пропорции не плыли */
 .t-main { container-type: size; padding: 5cqh 4.4cqw; justify-content: space-between; gap: 2cqh; }
