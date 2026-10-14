@@ -119,6 +119,10 @@ button, input, select, textarea { font: inherit; color: inherit; }
 /* Все логотипы нарисованы на одном холсте 180×173, поэтому размер у всех один — так они визуально равны. */
 .logo-big { height: 62cqh; width: auto; aspect-ratio: 180.47 / 172.99; }
 .logo-small { height: 34px; width: auto; aspect-ratio: 180.47 / 172.99; flex: none; }
+/* https:// — длинная надпись: её обрезанный холст шире, а высоту букв подбираем
+   примерно в треть диаметра кругов, чтобы по весу она была наравне с соседями. */
+.logo-big.logo-generic { aspect-ratio: auto; height: 21cqh; max-width: 74cqw; }
+.logo-small.logo-generic { aspect-ratio: auto; height: 16px; }
 
 /* Центральная плитка: все размеры от высоты плитки, чтобы пропорции не плыли */
 .t-main { container-type: size; padding: 5cqh 4.4cqw; justify-content: space-between; gap: 2cqh; }
