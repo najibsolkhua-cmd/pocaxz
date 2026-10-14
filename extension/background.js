@@ -39,6 +39,14 @@ let current = null;
 // «Стоп»: прерываем обход и закрываем текущую вкладку.
 let stopRequested = false;
 let currentHandle = null;
+// Промис, который выполняется в момент «Стоп»: им обрываются все ожидания обхода
+// (загрузка вкладки, паузы между страницами и источниками, скрипт на странице).
+let stopSignal = null;
+let fireStop = () => {};
+class Stopped extends Error { constructor() { super('остановлено'); } }
+function armStop() { stopSignal = new Promise((r) => { fireStop = r; }); }
+const abortable = (p) => (stopSignal ? Promise.race([p, stopSignal.then(() => { throw new Stopped(); })]) : p);
+const nap = (ms) => (stopSignal ? Promise.race([sleep(ms), stopSignal]) : sleep(ms));
 // Прогресс для главной: какие источники в очереди, какой обходится сейчас.
 let progress = { total: 0, done: 0, current: null, queue: [], finishedAt: null };
 
@@ -74,15 +82,23 @@ async function planDue(settings, { force = false, sourceId = null } = {}) {
 // Вызывающий код уже выставил running = true.
 async function runQueue(due, settings) {
   const stop = keepAlive();
+  armStop();
   try {
-    progress = { total: due.length, done: 0, current: null, queue: due.map((s) => ({ id: s.id, platform: s.platform, name: s.name })), finishedAt: null };
+    const all = await store.getAll();
+    const per = due.length === 1 ? settings.scanLimit : store.budgetPlan(due.length, settings.scanLimit).per;
+    progress = {
+      total: due.length, done: 0, current: null, finishedAt: null,
+      queue: due.map((s) => ({ id: s.id, platform: s.platform, name: s.name, est: estimateSec(s, per, settings, all[`srcstate:${s.id}`] || {}) })),
+      pauseSec: (settings.pauseBetweenSources[0] + settings.pauseBetweenSources[1]) / 2000,
+    };
     let remaining = Number(settings.scanLimit) || 100;
     for (let i = 0; i < due.length; i++) {
       if (stopRequested) break;
-      if (i > 0) await sleep(rand(...settings.pauseBetweenSources));
+      if (i > 0) await nap(rand(...settings.pauseBetweenSources));
       if (stopRequested) break;
       current = due[i].name;
       progress.current = progress.queue.shift();
+      progress.currentStart = Date.now();
       progress.found = 0;
       progress.page = 0;
       progress.detail = 0;
@@ -93,7 +109,7 @@ async function runQueue(due, settings) {
       remaining -= r?.fresh || 0;
       progress.done++;
     }
-    await cleanup(settings);
+    if (!stopRequested) await cleanup(settings);
   } finally {
     running = false;
     current = null;
@@ -101,6 +117,7 @@ async function runQueue(due, settings) {
     // После «Стоп» автопоиск не продолжается через 5 минут: каждый источник ждёт свой интервал.
     if (stopRequested) await rescheduleAll().catch(console.error);
     stopRequested = false;
+    stopSignal = null;
     currentHandle = null;
     stop();
   }
@@ -128,6 +145,8 @@ async function tick() {
 
 // Ручной запуск: кнопка «Найти работу» или «Искать» у источника.
 async function startManual(sourceId) {
+  // Только что нажали «Стоп» — обход доделывает запись найденного, это доли секунды.
+  for (let i = 0; i < 100 && running && stopRequested; i++) await sleep(100);
   if (running) return { busy: true, current };
   running = true;
   try {
@@ -137,7 +156,7 @@ async function startManual(sourceId) {
     if (!due.length) { running = false; return { started: false, total: 0 }; }
     runQueue(due, settings).catch(console.error);
     const plan = store.budgetPlan(due.length, settings.scanLimit);
-    return { started: true, total: due.length, per: due.length === 1 ? settings.scanLimit : plan.per, deep: due.length > 1 && plan.deep };
+    return { started: true, total: due.length, per: due.length === 1 ? settings.scanLimit : plan.per, deep: due.length > 1 && plan.deep, etaSec: progress.total ? etaSec() : null };
   } catch (e) {
     running = false;
     throw e;
@@ -145,13 +164,13 @@ async function startManual(sourceId) {
 }
 
 function waitTabComplete(tabId, timeout = 45e3) {
-  return new Promise((resolve, reject) => {
+  return abortable(new Promise((resolve, reject) => {
     const timer = setTimeout(() => { done(); reject(new Error('страница не загрузилась за 45 с')); }, timeout);
     const listener = (id, info) => { if (id === tabId && info.status === 'complete') { done(); resolve(); } };
     const done = () => { clearTimeout(timer); chrome.tabs.onUpdated.removeListener(listener); };
     chrome.tabs.onUpdated.addListener(listener);
     chrome.tabs.get(tabId).then((t) => { if (t.status === 'complete') { done(); resolve(); } }).catch(() => {});
-  });
+  }));
 }
 
 async function openHidden(url, mode) {
@@ -170,12 +189,12 @@ async function inject(tabId) {
 }
 
 async function callInTab(tabId, method, cfg) {
-  await inject(tabId);
-  const [r] = await chrome.scripting.executeScript({
+  await abortable(inject(tabId));
+  const [r] = await abortable(chrome.scripting.executeScript({
     target: { tabId },
     func: (m, c) => globalThis.__jobRadar[m](c),
     args: [method, cfg],
-  });
+  }));
   return r?.result;
 }
 
@@ -188,10 +207,32 @@ const DETAIL_CAP = { hh: 50, avito: 10, generic: 20, telegram: 0 };
 const RECHECK_PER_RUN = { hh: 6, avito: 4, generic: 0, telegram: 0 };
 const MAX_PAGES = 100;
 
+// ---------- Сколько ждать ----------
+// Оценка времени на источник: открытие, страницы выдачи, описания, проверка архива.
+// Если источник уже обходили, учитываем, сколько это заняло в прошлый раз.
+const EST = { hh: { open: 9, page: 8, detail: 5 }, avito: { open: 11, page: 11, detail: 8.5 }, telegram: { open: 7, page: 5, detail: 0 }, generic: { open: 12, page: 7, detail: 6 } };
+const PER_PAGE = { hh: 40, avito: 50, telegram: 20, generic: 30 };
+function estimateSec(src, quota, settings, st) {
+  const e = EST[src.platform] || EST.generic;
+  // Повторный поиск берёт только новые — их обычно столько же, сколько было в прошлый раз.
+  const expectNew = st.lastRunAt ? Math.min(quota, Math.max(st.lastFresh ?? quota, 5)) : quota;
+  const pages = Math.max(1, Math.min(MAX_PAGES, Math.ceil(expectNew / PER_PAGE[src.platform])));
+  const details = Math.min(Number(settings.deepCheck) || 20, DETAIL_CAP[src.platform] || 0, expectNew);
+  let t = e.open + pages * e.page + details * e.detail + (RECHECK_PER_RUN[src.platform] || 0) * e.detail * 0.6 + (store.autoFillOn(src) ? 8 : 0);
+  if (st.lastMs && ['ok', 'empty', 'partial'].includes(st.lastStatus)) t = 0.5 * t + 0.5 * (st.lastMs / 1000);
+  return Math.round(t);
+}
+function etaSec() {
+  if (!progress.total) return null;
+  const cur = progress.current ? Math.max(5, (progress.current.est || 30) - (Date.now() - (progress.currentStart || Date.now())) / 1000) : 0;
+  const rest = progress.queue.reduce((n, q) => n + (q.est || 30), 0);
+  return Math.round(cur + rest + progress.queue.length * (progress.pauseSec || 0));
+}
+
 // Переход вкладки на новый адрес: ждём сначала начала загрузки, потом её конца —
 // иначе можно прочитать старую страницу, у которой статус ещё «complete».
 function navigate(tabId, url, timeout = 45e3) {
-  return new Promise((resolve, reject) => {
+  return abortable(new Promise((resolve, reject) => {
     let started = false;
     const timer = setTimeout(() => { done(); reject(new Error('страница не загрузилась за 45 с')); }, timeout);
     const listener = (id, info) => {
@@ -202,7 +243,7 @@ function navigate(tabId, url, timeout = 45e3) {
     const done = () => { clearTimeout(timer); chrome.tabs.onUpdated.removeListener(listener); };
     chrome.tabs.onUpdated.addListener(listener);
     chrome.tabs.update(tabId, { url }).catch((e) => { done(); reject(e); });
-  });
+  }));
 }
 
 // Подробности: для hh и Avito — запросом с той же вкладки, для сайтов компаний —
@@ -215,7 +256,7 @@ async function fetchDetails(tabId, platform, list, mode = 'tab') {
       if (stopRequested) break;
       const r = await viaOffscreen('detail', it.url).catch((e) => ({ fail: String(e?.message || e) }));
       results[it.externalId] = r.fail ? { error: r.fail } : r;
-      await sleep(rand(...DETAIL_DELAY.generic));
+      await nap(rand(...DETAIL_DELAY.generic));
     }
     return { results, blocked: null };
   }
@@ -238,7 +279,7 @@ async function fetchDetails(tabId, platform, list, mode = 'tab') {
     } catch (e) {
       results[it.externalId] = { error: String(e?.message || e) };
     }
-    await sleep(rand(...DETAIL_DELAY.generic));
+    await nap(rand(...DETAIL_DELAY.generic));
   }
   return { results, blocked: null };
 }
@@ -267,13 +308,13 @@ async function ensureOffscreen() {
   await offscreenCreating;
 }
 async function viaOffscreen(type, url, cfg = {}) {
-  await ensureOffscreen();
-  return (await chrome.runtime.sendMessage({ target: 'offscreen', type, url, cfg })) || { fail: 'пустой ответ' };
+  await abortable(ensureOffscreen());
+  return (await abortable(chrome.runtime.sendMessage({ target: 'offscreen', type, url, cfg }))) || { fail: 'пустой ответ' };
 }
 
 // После «Найти» на сайте: ждём перехода на страницу результатов (или перерисовки списка).
 function settleAfterSubmit(tabId) {
-  return new Promise((resolve) => {
+  return abortable(new Promise((resolve) => {
     let started = false;
     let done = false;
     const timers = [];
@@ -291,7 +332,7 @@ function settleAfterSubmit(tabId) {
     };
     chrome.tabs.onUpdated.addListener(listener);
     timers.push(setTimeout(() => { if (!started) finish(); }, 5000), setTimeout(finish, 45e3));
-  });
+  }));
 }
 
 async function runSource(src, settings, quota = settings.scanLimit) {
@@ -324,6 +365,7 @@ async function runSource(src, settings, quota = settings.scanLimit) {
   let archived = 0;
   let handle = null;
   let mode = src.platform === 'generic' && (src.cfg?.fetchMode || st.mode === 'fetch') ? 'fetch' : 'tab';
+  let guarded = false; // браузер не пустил расширение на страницу (защищённый режим)
   // Что подставили из профиля — показываем у источника, чтобы можно было проверить.
   let fillInfo = startUrl !== src.url ? { query: fill.query, via: 'ссылка' } : null;
   try {
@@ -332,7 +374,7 @@ async function runSource(src, settings, quota = settings.scanLimit) {
       handle = await openHidden(url, settings.openIn);
       currentHandle = handle;
       await waitTabComplete(handle.tabId);
-      await sleep(rand(1500, 3000));
+      await nap(rand(1500, 3000));
       if (fill && !stopRequested) {
         try {
           const r = await callInTab(handle.tabId, 'fillSearch', { ...fill, waitMs: 600 });
@@ -344,6 +386,7 @@ async function runSource(src, settings, quota = settings.scanLimit) {
         } catch (e) {
           if (!isPermError(e)) throw e;
           mode = 'fetch';
+          guarded = true;
         }
       }
     }
@@ -357,7 +400,7 @@ async function runSource(src, settings, quota = settings.scanLimit) {
           res = await extractInTab(handle.tabId, cfg);
           // Первая страница пустая и без капчи — чаще всего сайт не успел догрузиться.
           if (!res.items?.length && !res.blocked && !stopRequested && pages === 0) {
-            await sleep(rand(2500, 4500));
+            await nap(rand(2500, 4500));
             try {
               res = await extractInTab(handle.tabId, { ...cfg, waitMs: 4000 });
               // Поиск сайта по должности ничего не дал (у сайта строгий поиск) — берём исходный список.
@@ -375,6 +418,7 @@ async function runSource(src, settings, quota = settings.scanLimit) {
         } catch (e) {
           if (!isPermError(e) || src.platform !== 'generic') throw e;
           mode = 'fetch';
+          guarded = true;
         }
       }
       if (mode === 'fetch') {
@@ -400,11 +444,11 @@ async function runSource(src, settings, quota = settings.scanLimit) {
       // Повторный поиск: если на странице только уже известные вакансии, дальше — старые.
       if (stopRequested || fresh >= quota || collected.size === before || !newOnPage || !res.nextUrl || pages >= MAX_PAGES) break;
       url = res.nextUrl;
-      await sleep(rand(...PAGE_DELAY[src.platform]));
+      await nap(rand(...PAGE_DELAY[src.platform]));
       if (mode === 'tab') {
         try { await navigate(handle.tabId, url); } catch {
           // Сеть моргнула — ещё одна попытка, потом сдаёмся и сохраняем собранное.
-          await sleep(rand(3000, 6000));
+          await nap(rand(3000, 6000));
           try { await navigate(handle.tabId, url); } catch (e) { error = String(e?.message || e); break; }
         }
       }
@@ -475,6 +519,9 @@ async function runSource(src, settings, quota = settings.scanLimit) {
     try { stats = await ingest([...collected.values()], src.platform, src); } catch { /* ignore */ }
   }
 
+  if (guarded && !collected.size && !stopRequested) {
+    error = `Яндекс Браузер открывает ${new URL(startUrl).hostname} в «Защищённом режиме» (так он защищает сайты банков) и не пускает туда расширения, а в скачанной без вкладки странице вакансий нет. Выход: отключить защищённый режим для сайтов банков в настройках браузера (раздел «Безопасность») или вставить ссылку на страницу, где поиск уже выполнен.`;
+  }
   const failures = blocked || (error && !collected.size) ? (st.failures || 0) + 1 : 0;
   let status = 'ok';
   let waitMin = src.intervalMin * rand(0.85, 1.15);
@@ -507,6 +554,7 @@ async function runSource(src, settings, quota = settings.scanLimit) {
     lastDetailed: detailed,
     lastPages: pages,
     lastLimit: settings.scanLimit,
+    lastMs: Date.now() - started.getTime(),
     mode: mode === 'fetch' && collected.size ? 'fetch' : null,
     filled: fillInfo || st.filled || null,
     failures,
@@ -757,10 +805,18 @@ const handlers = {
   async stop() {
     if (!running) return { running: false };
     stopRequested = true;
+    fireStop();
     currentHandle?.close();
+    // Главная сразу возвращается в исходное состояние; найденное допишется в фоне.
+    progress = { total: 0, done: 0, current: null, queue: [], finishedAt: new Date().toISOString(), stopped: true };
     return { stopping: true };
   },
-  status: async () => ({ running, current, progress }),
+  status: async () => ({
+    running: running && !stopRequested,
+    stopping: running && stopRequested,
+    current: stopRequested ? null : current,
+    progress: running && !stopRequested ? { ...progress, etaSec: etaSec() } : progress,
+  }),
   collectTab: ({ tabId }) => collectFromTab(tabId),
   inspectUrl: ({ url }) => inspectUrl(url),
   async addSource({ url, name, platform }) {

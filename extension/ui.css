@@ -130,6 +130,24 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .clock { display: block; height: 23cqh; width: auto; overflow: visible; flex: none; }
 .clock text { font: 600 100px Manrope, sans-serif; }
 .brand { height: 19cqh; width: auto; max-width: 52%; display: block; margin-top: .5cqh; }
+.main-left { display: flex; align-items: flex-start; gap: 4.6cqw; min-width: 0; }
+/* «/ поддержка»: белая плашка того же шрифта, по вертикали — по центру строки со временем. */
+.support {
+  --sh: 11cqh;
+  flex: none; height: var(--sh); margin-top: calc(23cqh * var(--time-frac, .56) / 2 - var(--sh) / 2);
+  display: inline-flex; align-items: center; padding: 0 3.2cqw; border-radius: 3cqh;
+  background: #fff; color: var(--red); border: 2px solid #fff;
+  font: 500 5.4cqh/1 Manrope, sans-serif; letter-spacing: -.005em; white-space: nowrap; text-decoration: none;
+  transition: background .15s ease, color .15s ease;
+}
+.support:hover { background: transparent; color: #fff; }
+.support:focus-visible { outline: 2px solid #fff; outline-offset: 3px; }
+/* Узкая плитка (телефон): «/ поддержка» под часами, чтобы не наезжать на логотип. */
+@container (max-width: 520px) {
+  .main-left { flex-direction: column; gap: 2cqh; }
+  .support { --sh: 8cqh; margin-top: 0; font-size: 4.2cqh; padding: 0 3.6cqw; border-radius: 2.4cqh; }
+  .brand { height: 15cqh; }
+}
 .who {
   flex: 1; min-height: 0;
   background: none; border: 0; color: #fff; cursor: pointer; text-align: center;
@@ -154,9 +172,16 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .limit .on { background: #fff; color: var(--red); border-color: #fff; }
 .limit input#limitInput:focus { outline: none; border-color: #fff; background: rgba(255, 255, 255, .14); }
 .limit input#limitInput.on { background: #fff; color: var(--red); }
-.limit-hint { opacity: .85; font-weight: 500; white-space: nowrap; cursor: help; }
+.limit-hint { color: #fff; font-weight: 500; white-space: nowrap; cursor: help; }
 .limit-hint:empty { display: none; }
+.limit-hint.warn { color: #fff; }
 .limit-hint.warn::before { content: '⚠ '; }
+/* Таймер поиска — на месте выбора лимита, та же высота строки, цифры не прыгают. */
+.eta { display: flex; align-items: center; justify-content: center; gap: 1.4cqw; height: 7.4cqh; font: 500 4.4cqh/1 Manrope, sans-serif; color: #fff; font-variant-numeric: tabular-nums; }
+.eta[hidden] { display: none; }
+.eta-dot { width: 1.8cqh; height: 1.8cqh; border-radius: 50%; background: #fff; animation: eta-pulse 1.6s ease-in-out infinite; }
+@keyframes eta-pulse { 50% { opacity: .25; } }
+.t-main.running .limit { display: none; }
 .find-row { display: flex; gap: 1.6cqw; }
 .find {
   position: relative; overflow: hidden; flex: 1; min-width: 0;

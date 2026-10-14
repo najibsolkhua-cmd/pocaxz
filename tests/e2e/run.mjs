@@ -58,6 +58,11 @@ function route(url) {
 const hits = [];
 const server = http.createServer((req, res) => {
   hits.push(req.url);
+  // Очень медленный сайт: страница грузится 25 секунд (проверка мгновенного «Стоп»).
+  if (req.url.startsWith('/slow')) {
+    setTimeout(() => { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); res.end('<!doctype html><meta charset="utf-8"><p>долго</p>'); }, 25000);
+    return;
+  }
   const body = route(req.url);
   res.writeHead(body ? 200 : 404, { 'content-type': 'text/html; charset=utf-8' });
   res.end(body || 'not found');
@@ -247,6 +252,15 @@ try {
     assert.ok(Math.abs(tw - dw) / tw < 0.08, `время и дата одной ширины: ${tw} / ${dw}`);
     assert.ok(await page.locator('#accessBar').isHidden(), 'доступ к сайтам есть — плашки нет');
     assert.ok((await page.locator('#searchTile').textContent()).includes('включится после первого поиска'), 'до первого поиска автопоиск не запускается');
+    // «/ поддержка» — ссылка на Telegram, по центру строки со временем.
+    assert.equal(await page.locator('#supportLink').getAttribute('href'), 'https://t.me/max_max3700');
+    const m = await page.evaluate(() => {
+      const sup = document.getElementById('supportLink').getBoundingClientRect();
+      const clk = document.getElementById('clockSvg').getBoundingClientRect();
+      const frac = Number(getComputedStyle(document.getElementById('mainTile')).getPropertyValue('--time-frac'));
+      return { supMid: (sup.top + sup.bottom) / 2, timeMid: clk.top + (clk.height * frac) / 2, frac };
+    });
+    assert.ok(m.frac > 0.3 && Math.abs(m.supMid - m.timeMid) < 4, `поддержка по центру строки со временем: ${JSON.stringify(m)}`);
     assert.ok(await page.locator('.limit button.on', { hasText: '100' }).count(), 'по умолчанию 100');
     await page.locator('#limitInput').fill('250');
     await page.locator('#limitInput').press('Enter');
@@ -439,31 +453,48 @@ try {
     assert.equal(hits.length, n);
   });
 
-  await step('кнопка «Стоп» останавливает поиск, найденное сохраняется', async () => {
-    await page.evaluate(async () => {
-      const { settings } = await chrome.storage.local.get('settings');
-      await chrome.storage.local.set({ settings: { ...settings, scanLimit: 1000 } });
-    });
+  await step('кнопка «Стоп» срабатывает сразу, даже пока сайт грузится; таймер показывает, сколько ждать', async () => {
+    const before = await storage(page);
+    await page.evaluate(async (b) => {
+      const { settings, sources } = await chrome.storage.local.get(['settings', 'sources']);
+      const slow = { id: 'slow', platform: 'generic', name: 'Медленный сайт', url: `${b}/slow`, intervalMin: 360, enabled: true, autoFill: false, cfg: {} };
+      await chrome.storage.local.set({ settings: { ...settings, scanLimit: 1000 }, sources: [slow, ...sources] });
+    }, base);
     await page.waitForTimeout(600);
     await page.evaluate(() => chrome.runtime.sendMessage({ type: 'runNow' }));
     await until(() => page.locator('#stopBtn').isVisible(), 8000, 'кнопка «Стоп» появилась');
+    // Таймер вместо выбора лимита: «осталось ≈ м:сс · готово к чч:мм».
+    await until(async () => /^осталось ≈ \d+:\d\d · готово к \d\d:\d\d$/.test(await page.locator('#etaText').textContent()), 4000, 'таймер');
+    assert.ok(await page.locator('.limit').isHidden(), 'во время поиска выбор лимита скрыт');
     const text = await page.locator('#findText').textContent();
     const oneLine = await page.locator('#findText').evaluate((el) => el.offsetHeight < parseFloat(getComputedStyle(el).fontSize) * 1.8 && getComputedStyle(el).whiteSpace === 'nowrap');
     assert.ok(oneLine, `текст прогресса в одну строку: ${text}`);
+    await page.waitForTimeout(1500); // медленный сайт ещё грузится
+    const t0 = Date.now();
     await page.locator('#stopBtn').click();
-    await waitIdle(page, 30000);
-    await until(() => page.locator('#stopBtn').isHidden(), 5000, 'кнопка «Стоп» скрылась');
+    // Главная — сразу в исходном состоянии.
+    await until(async () => (await page.locator('#findText').textContent()) === '/ Найти работу', 1000, 'кнопка вернулась сразу');
+    assert.ok(await page.locator('#stopBtn').isHidden() && await page.locator('.limit').isVisible() && await page.locator('#eta').isHidden());
+    assert.equal(await page.locator('.t-src.scanning').count(), 0, 'плитки не «ищу…»');
+    assert.ok(!(await page.locator('.t-src').allTextContents()).some((t) => t.includes('в очереди')), 'плитки не «в очереди»');
+    // И фон действительно остановился, не дожидаясь 25-секундной загрузки.
+    await until(async () => !(await page.evaluate(() => chrome.runtime.sendMessage({ type: 'status' }))).stopping, 3000, 'фон остановился');
+    assert.ok(Date.now() - t0 < 4000, `остановка заняла ${Date.now() - t0} мс`);
     const st = await storage(page);
-    assert.ok(Object.keys(st).some((k) => k.startsWith('srcstate:') && st[k].lastStatus === 'stopped'), `источник помечен «остановлено»: ${Object.keys(st).filter((k) => k.startsWith('srcstate:')).map((k) => `${k}=${st[k].lastStatus}@${st[k].lastRunAt}`).join(', ')}`);
+    assert.equal(st['srcstate:slow']?.lastStatus, 'stopped', 'источник помечен «остановлено»');
     // После «Стоп» следующий поиск у каждого источника — не раньше его интервала.
     for (const s of st.sources.filter((x) => x.enabled)) {
       const next = Date.parse(st[`srcstate:${s.id}`]?.nextRunAt || 0);
       assert.ok(next > Date.now() + s.intervalMin * 60e3 * 0.8, `${s.name}: следующий поиск через интервал (${st[`srcstate:${s.id}`]?.nextRunAt})`);
     }
-    await page.evaluate(async () => {
+    // Сразу можно искать снова.
+    const again = await page.evaluate(() => chrome.runtime.sendMessage({ type: 'runNow', sourceId: 'tg' }));
+    assert.ok(again.started, `новый поиск после «Стоп»: ${JSON.stringify(again)}`);
+    await waitIdle(page);
+    await page.evaluate(async (srcs) => {
       const { settings } = await chrome.storage.local.get('settings');
-      await chrome.storage.local.set({ settings: { ...settings, scanLimit: 100 } });
-    });
+      await chrome.storage.local.set({ settings: { ...settings, scanLimit: 100 }, sources: srcs });
+    }, before.sources);
   });
 
   await step('несколько профилей: новый — чистый, источники общие, статусы у каждого свои', async () => {

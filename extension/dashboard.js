@@ -73,6 +73,8 @@ function renderClock() {
   dt.setAttribute('y', timeBottom + gap + dm.ascent * k);
   const h = timeBottom + gap + (dm.ascent + dm.descent) * k;
   $('clockSvg').setAttribute('viewBox', `0 0 ${timeW.toFixed(1)} ${h.toFixed(1)}`);
+  // Доля высоты часов, которую занимает время, — по ней «/ поддержка» встаёт по центру строки.
+  $('mainTile').style.setProperty('--time-frac', (timeBottom / h).toFixed(3));
   clockShown = `${t}|${date}`;
 }
 
@@ -161,6 +163,9 @@ function renderMain() {
   const btn = $('findBtn');
   btn.classList.toggle('busy', running);
   $('stopBtn').hidden = !running;
+  $('mainTile').classList.toggle('running', Boolean(running));
+  $('eta').hidden = !running;
+  if (running) $('etaText').textContent = etaLine(progress?.etaSec);
   if (running && progress?.total) {
     const cur = progress.current;
     // Коротко, в одну строку: площадка · страница · сколько собрано · какой источник по счёту.
@@ -176,6 +181,20 @@ function renderMain() {
     $('findFill').style.width = '0%';
   }
 }
+
+// «осталось ≈ 3:12 · готово к 16:15». Оценка — по числу страниц и описаний и по прошлым поискам.
+function fmtDuration(sec) {
+  const s = Math.max(0, Math.round(sec));
+  if (s >= 3600) return `${Math.floor(s / 3600)} ч ${String(Math.round((s % 3600) / 60)).padStart(2, '0')} мин`;
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+function etaLine(sec) {
+  if (sec == null) return 'считаю время…';
+  if (sec <= 5) return 'почти готово…';
+  const end = new Date(Date.now() + sec * 1000).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+  return `осталось ≈ ${fmtDuration(sec)} · готово к ${end}`;
+}
+const aboutMin = (sec) => (sec < 90 ? 'около минуты' : `около ${Math.round(sec / 60)} ${plural(Math.round(sec / 60), 'минуты', 'минут', 'минут')}`);
 
 function renderProfileTile() {
   const p = state.profile;
@@ -565,8 +584,8 @@ async function findWork() {
   startedHere = Boolean(r?.started);
   if (r?.busy) toast('Поиск уже идёт');
   else if (r && !r.started) toast('Все источники уже проверены за последние 10 минут — результаты на плитках. Чтобы проверить больше вакансий, увеличьте лимит.');
-  else if (r.deep) toast(`Источников ${r.total} — много для лимита ${state.settings.scanLimit}. Проверю каждый по первой странице (~${r.per} вакансий): это дольше, зато ничего не пропущу. Повторный поиск — только новые вакансии, быстро.`);
-  else toast(`Ищу в ${r.total} ${plural(r.total, 'источнике', 'источниках', 'источниках')}${r.total > 1 ? `, примерно по ${r.per} новых вакансий в каждом` : ''}. Вкладки открываются в фоне и закрываются сами.`);
+  else if (r.deep) toast(`Источников ${r.total} — много для лимита ${state.settings.scanLimit}. Проверю каждый по первой странице (~${r.per} вакансий)${r.etaSec ? `, это займёт ${aboutMin(r.etaSec)}` : ''}: дольше, зато ничего не пропущу. Повторный поиск — только новые вакансии, быстро.`);
+  else toast(`Ищу в ${r.total} ${plural(r.total, 'источнике', 'источниках', 'источниках')}${r.total > 1 ? `, примерно по ${r.per} новых вакансий в каждом` : ''}${r.etaSec ? `. Займёт ${aboutMin(r.etaSec)}` : ''}. Вкладки открываются в фоне и закрываются сами.`);
   pollStatus();
 }
 
@@ -633,12 +652,16 @@ function bind() {
   });
   $('stopBtn').addEventListener('click', async (e) => {
     e.stopPropagation();
-    await send({ type: 'stop' });
-    $('findText').textContent = 'Останавливаю…';
-    toast('Поиск остановлен. Найденное сохранено — поправьте профиль и нажмите «/ Найти работу» снова.');
+    // Сразу возвращаем главную в исходное состояние, не дожидаясь фона.
     startedHere = false;
+    state.status = { running: false, progress: { total: 0, done: 0, queue: [], stopped: true } };
+    renderMain();
+    renderSourceTiles();
+    await send({ type: 'stop' });
+    toast('Поиск остановлен. Найденное сохранено — поправьте профиль и нажмите «/ Найти работу» снова.');
     pollStatus();
   });
+  $('supportLink').addEventListener('click', (e) => e.stopPropagation());
   document.querySelectorAll('.limit button').forEach((b) => b.addEventListener('click', () => setLimit(b.dataset.limit)));
   $('limitInput').addEventListener('change', (e) => setLimit(e.target.value));
   $('limitInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') e.target.blur(); });
