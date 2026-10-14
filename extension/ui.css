@@ -153,9 +153,10 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .main-left { display: flex; align-items: flex-start; gap: 4.6cqw; min-width: 0; }
 /* «/ поддержка»: белая плашка того же шрифта, по вертикали — по центру строки со временем. */
 .support {
-  --sh: 11cqh;
-  /* Центр по вертикали — середина надписи «solk» в логотипе (ink 51.9…157.6 из 126.36 высоты SVG). */
-  flex: none; height: var(--sh); margin-top: calc(var(--brand-top) + var(--brand-h) * .473 - var(--sh) / 2);
+  /* По направляющим логотипа: верх — по верху строчных «s/o», низ — по нижнему краю «solk»
+     (в SVG 126.36 высотой с верхом 44.98: строчные 79.4…157.5). */
+  --sh: calc(var(--brand-h) * .6181);
+  flex: none; height: var(--sh); margin-top: calc(var(--brand-top) + var(--brand-h) * .2724);
   display: inline-flex; align-items: center; padding: 0 3.2cqw; border-radius: 3cqh;
   background: #fff; color: var(--red); border: 2px solid #fff;
   font: 500 5.4cqh/1 Manrope, sans-serif; letter-spacing: -.005em; white-space: nowrap; text-decoration: none;

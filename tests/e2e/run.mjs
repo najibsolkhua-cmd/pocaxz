@@ -265,13 +265,14 @@ try {
     assert.ok((await page.locator('#searchTile').textContent()).includes('включится после первого поиска'), 'до первого поиска автопоиск не запускается');
     // «/ поддержка» — ссылка на Telegram, по центру строки со временем.
     assert.equal(await page.locator('#supportLink').getAttribute('href'), 'https://t.me/max_max3700');
-    // Середина надписи «solk» в логотипе: 51.9…157.6 из высоты SVG 126.36 (верх 44.98).
+    // По направляющим логотипа: верх кнопки — по верху строчных «s/o», низ — по нижнему краю «solk».
     const m = await page.evaluate(() => {
       const sup = document.getElementById('supportLink').getBoundingClientRect();
       const brand = document.querySelector('.brand').getBoundingClientRect();
-      return { supMid: (sup.top + sup.bottom) / 2, solkMid: brand.top + brand.height * ((51.9 + 157.6) / 2 - 44.98) / 126.36 };
+      const at = (y) => brand.top + (brand.height * (y - 44.98)) / 126.36;
+      return { top: sup.top, bottom: sup.bottom, xTop: at(79.4), base: at(157.5) };
     });
-    assert.ok(Math.abs(m.supMid - m.solkMid) < 3, `«/ поддержка» на одной линии с «solk»: ${JSON.stringify(m)}`);
+    assert.ok(Math.abs(m.top - m.xTop) < 2 && Math.abs(m.bottom - m.base) < 2, `«/ поддержка» по направляющим «solk»: ${JSON.stringify(m)}`);
     assert.ok(await page.locator('.limit button.on', { hasText: '100' }).count(), 'по умолчанию 100');
     await page.locator('#limitInput').fill('250');
     await page.locator('#limitInput').press('Enter');
