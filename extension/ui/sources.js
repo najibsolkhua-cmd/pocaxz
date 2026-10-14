@@ -22,7 +22,7 @@ const ADD_HELP = {
   },
   generic: {
     placeholder: 'https://company.ru/careers/vacancies',
-    help: 'Страница со списком вакансий компании. Браузер спросит разрешение на доступ к сайту — его нужно дать. Если вакансии не находятся, раскройте «Ручная настройка».',
+    help: 'Любая страница со списком вакансий: сайт компании, rabota.ru, superjob.ru, rabota.sber.ru… Должность и город из профиля подставятся сами — в ссылку или в поля поиска на сайте, переходить туда и заполнять ничего не нужно.',
   },
 };
 
@@ -54,6 +54,14 @@ function stateLine(st) {
   return parts.join(' · ');
 }
 
+function fillLine(s, st) {
+  if (s.platform !== 'generic' || s.autoFill === false || !st.filled) return null;
+  const f = st.filled;
+  const what = [f.query ? h('span', {}, 'должность ', h('b', {}, `«${f.query}»`)) : null, f.city ? h('span', {}, `${f.query ? ', ' : ''}город `, h('b', {}, f.city)) : null].filter(Boolean);
+  if (!what.length) return null;
+  return h('div', { class: 'src-fill' }, `Подставлено ${f.via === 'ссылка' ? 'в ссылку' : 'в поля сайта'}: `, ...what, '. Проверьте, что сайт понял правильно.', f.note ? ` (${f.note})` : '');
+}
+
 export function sourceRows(sources, all) {
   const update = async (id, patch) => {
     const list = await store.getSources();
@@ -71,7 +79,10 @@ export function sourceRows(sources, all) {
         h('a', { class: 'src-url', href: s.url, target: '_blank', rel: 'noopener', title: s.url }, s.url),
         h('div', { class: `src-state ${bad ? 'bad' : ''}` }, stateLine(st),
           st.lastError ? h('span', { class: 'muted' }, ` · ${st.lastError}`) : null,
-          ['blocked', 'partial'].includes(st.lastStatus) ? h('a', { href: s.url, target: '_blank', rel: 'noopener', class: 'fix' }, ' Открыть и пройти проверку →') : null)),
+          ['blocked', 'partial'].includes(st.lastStatus) ? h('a', { href: s.url, target: '_blank', rel: 'noopener', class: 'fix' }, ' Открыть и пройти проверку →') : null),
+        fillLine(s, st),
+        s.platform === 'generic' ? h('label', { class: 'src-autofill', title: 'Перед поиском вписывать должность и город из профиля в ссылку или в поля поиска на сайте' },
+          h('input', { type: 'checkbox', checked: s.autoFill !== false, onchange: (e) => update(s.id, { autoFill: e.target.checked }) }), 'Подставлять должность и город из профиля') : null),
       h('div', { class: 'src-actions' },
         h('select', { title: 'Как часто искать автоматически', onchange: (e) => update(s.id, { intervalMin: Number(e.target.value) }) },
           INTERVALS.map((m) => h('option', { value: m, selected: m === s.intervalMin }, intervalLabel(m)))),
@@ -123,10 +134,16 @@ export function addSourceForm(platform) {
     const src = store.makeSource(u, { platform: p, name: name.value.trim() || undefined, cfg });
     if (sources.some((s) => s.url === src.url)) { msg.textContent = 'Такой источник уже есть.'; return; }
     await store.saveSources([...sources, src]);
+    // Должность из профиля — сразу в ссылку, если у неё есть параметр поиска.
+    await store.syncAutoSources(await store.getProfile());
+    const saved = (await store.getSources()).find((x) => x.id === src.id) || src;
     form.reset();
-    msg.textContent = `Добавлено: ${src.name}. Нажмите «Искать» или «/ Найти работу».`;
+    msg.textContent = saved.url !== src.url
+      ? `Добавлено: ${saved.name}. Должность из профиля уже в ссылке. Нажмите «Искать» или «/ Найти работу».`
+      : `Добавлено: ${saved.name}. Должность и город впишутся в поля сайта при поиске. Нажмите «Искать» или «/ Найти работу».`;
   } },
   h('p', { class: 'muted small' }, help.help),
+  platform === 'generic' ? h('p', { class: 'note-warn' }, 'Поля сайта заполняются автоматически и могут быть заполнены не совсем точно: всё зависит от сайта и профессии. Для узких специальностей после первого поиска проверьте строку «Подставлено…» у источника или откройте ссылку сами.') : null,
   h('div', { class: 'row' }, url, name, h('button', { type: 'submit', class: 'btn primary' }, 'Добавить')),
   platform === 'generic' ? h('details', {}, h('summary', { class: 'small muted' }, 'Ручная настройка, если вакансии не находятся автоматически'),
     h('div', { class: 'grid3' },

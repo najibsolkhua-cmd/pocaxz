@@ -87,13 +87,32 @@ function renderLimit() {
   const inp = $('limitInput');
   if (document.activeElement !== inp) inp.value = preset ? '' : String(n);
   inp.classList.toggle('on', !preset);
+  const hint = limitHint(n);
+  $('limitHint').textContent = hint.short;
+  $('limitHint').title = hint.long;
+  $('limitHint').classList.toggle('warn', hint.deep);
+}
+
+// Лимит — на весь поиск, делится между включёнными источниками.
+function limitHint(n) {
+  const k = state.sources.filter((s) => s.enabled).length;
+  if (k <= 1) return { short: '', long: '', deep: false };
+  const plan = store.budgetPlan(k, n);
+  if (plan.deep) {
+    return {
+      short: `${k} ист. · по ~${plan.per}`,
+      long: `Источников (${k}) много для лимита ${n}: на каждый не выходит даже страницы выдачи. Каждый источник всё равно будет проверен — по первой странице (~${plan.per} вакансий), всего около ${plan.total}. Это займёт больше времени, зато ничего не пропустим. Повторный поиск проверяет только новые вакансии и идёт быстро.`,
+      deep: true,
+    };
+  }
+  return { short: `≈${plan.per} на источник`, long: `${n} новых вакансий делятся между ${k} источниками: примерно по ${plan.per}. Если в источнике новых меньше, остаток достаётся следующим.`, deep: false };
 }
 
 async function setLimit(n) {
   const v = Math.max(1, Math.min(5000, Math.round(Number(n) || 0)));
   if (!v) return;
   await store.saveSettings({ ...(await store.getSettings()), scanLimit: v });
-  toast(`Буду проверять до ${v} ${plural(v, 'вакансии', 'вакансий', 'вакансий')} в каждом источнике`);
+  toast(`За поиск проверю до ${v} новых ${plural(v, 'вакансии', 'вакансий', 'вакансий')} — поровну между источниками. ${limitHint(v).long}`.trim());
 }
 
 function renderSourceTiles() {
@@ -236,7 +255,7 @@ function renderSearchTile() {
     h('dt', {}, 'Последний поиск'), h('dd', {}, last ? fmtTime(last.at) : 'ещё не было'),
     h('dt', {}, 'Подходят вам'), h('dd', {}, `${good} из ${total} собранных`),
     h('dt', {}, 'Источников'), h('dd', {}, `${state.sources.filter((s) => s.enabled).length}${problems ? ` · ⚠ ${problems} с проблемой` : ''}`),
-    h('dt', {}, 'Авто-поиск'), h('dd', {}, auto ? (next ? `следующий ${fmtTime(next)}` : 'включён') : 'выключен')));
+    h('dt', {}, 'Авто-поиск'), h('dd', {}, !auto ? 'выключен' : !state.all.autoArmed && !runs.length ? 'включится после первого поиска' : next ? `следующий ${fmtTime(next)}` : 'включён')));
 }
 
 function renderAppliedTile() {
@@ -546,7 +565,8 @@ async function findWork() {
   startedHere = Boolean(r?.started);
   if (r?.busy) toast('Поиск уже идёт');
   else if (r && !r.started) toast('Все источники уже проверены за последние 10 минут — результаты на плитках. Чтобы проверить больше вакансий, увеличьте лимит.');
-  else toast(`Ищу в ${r.total} ${plural(r.total, 'источнике', 'источниках', 'источниках')}. Вкладки будут открываться в фоне и закрываться сами.`);
+  else if (r.deep) toast(`Источников ${r.total} — много для лимита ${state.settings.scanLimit}. Проверю каждый по первой странице (~${r.per} вакансий): это дольше, зато ничего не пропущу. Повторный поиск — только новые вакансии, быстро.`);
+  else toast(`Ищу в ${r.total} ${plural(r.total, 'источнике', 'источниках', 'источниках')}${r.total > 1 ? `, примерно по ${r.per} новых вакансий в каждом` : ''}. Вкладки открываются в фоне и закрываются сами.`);
   pollStatus();
 }
 

@@ -58,12 +58,13 @@
         <span class="position" id="whoPosition"></span>
       </button>
       <div class="main-bottom">
-        <div class="limit" role="group" aria-label="Сколько вакансий проверить в каждом источнике">
-          <span class="limit-label">Проверить в каждом источнике:</span>
+        <div class="limit" role="group" aria-label="Сколько новых вакансий проверить за поиск — делится между источниками">
+          <span class="limit-label">Проверить за поиск:</span>
           <button type="button" data-limit="10">10</button>
           <button type="button" data-limit="100">100</button>
           <button type="button" data-limit="1000">1000</button>
           <input id="limitInput" type="number" min="1" max="5000" step="1" placeholder="своё" aria-label="Своё число вакансий">
+          <span class="limit-hint" id="limitHint"></span>
         </div>
         <div class="find-row">
           <button class="find" id="findBtn" type="button">

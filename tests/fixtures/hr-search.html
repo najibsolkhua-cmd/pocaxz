@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><title>Поиск вакансий</title>
+<style>.suggest{position:absolute;background:#fff;border:1px solid #ccc;list-style:none;margin:0;padding:0}.suggest li{padding:4px 8px;cursor:pointer}</style></head>
+<body>
+<!-- Как rabota.sber.ru / rabota.x5.ru: поиск без параметров в ссылке, город — только из подсказки. -->
+<header><nav><a href="/hr">Вакансии</a> <a href="/hr/media/1001">Карьерные медиа</a></nav></header>
+<main>
+  <h1>Вакансии</h1>
+  <div class="search-box">
+    <input type="text" id="q" placeholder="Должность или ключевое слово">
+    <div style="position:relative">
+      <input type="text" id="city" placeholder="Город/регион" autocomplete="off">
+      <ul class="suggest" id="sug" hidden></ul>
+    </div>
+    <button type="button" id="go">Искать</button>
+  </div>
+  <p id="found"></p>
+  <div id="list"></div>
+  <section class="news">
+    <h2>Новости</h2>
+    <a href="/hr/news/2024001">Мы открыли офис</a> <a href="/hr/news/2024002">День открытых дверей</a> <a href="/hr/news/2024003">Итоги года</a>
+  </section>
+</main>
+<footer><a href="/hr/about">О компании</a></footer>
+<script>
+  const CITIES = ['Москва', 'Московская область', 'Мурманск', 'Санкт-Петербург', 'Казань'];
+  const ALL = [
+    { id: 4821305, t: 'Python backend-разработчик', c: 'Москва', d: 'FastAPI, PostgreSQL, Kafka. Гибрид.' },
+    { id: 4821306, t: 'Ведущий Python-разработчик (backend)', c: 'Москва', d: 'Django, Redis, микросервисы.' },
+    { id: 4821307, t: 'Python backend-разработчик', c: 'Казань', d: 'Офис в Казани.' },
+    { id: 4821400, t: 'Повар горячего цеха', c: 'Москва', d: 'Сменный график.' },
+    { id: 4821401, t: 'Курьер', c: 'Москва', d: 'Доставка.' },
+  ];
+  const sel = { city: '' };
+  const city = document.getElementById('city');
+  const sug = document.getElementById('sug');
+  city.addEventListener('input', () => {
+    const v = city.value.trim().toLowerCase();
+    sel.city = '';
+    sug.replaceChildren(...CITIES.filter((c) => v && c.toLowerCase().startsWith(v)).map((c) => {
+      const li = document.createElement('li');
+      li.textContent = c;
+      li.addEventListener('click', () => { city.value = c; sel.city = c; sug.hidden = true; });
+      return li;
+    }));
+    sug.hidden = !sug.children.length;
+  });
+  function render(list) {
+    document.getElementById('found').textContent = `Найдено вакансий: ${list.length}`;
+    document.getElementById('list').replaceChildren(...list.map((v) => {
+      const card = document.createElement('div');
+      card.className = 'card';
+      card.innerHTML = `<h3>${v.t}</h3><p>${v.c} · ПАО Тополь</p><p>${v.d}</p><a href="/hr/search/${v.id}">Подробнее</a>`;
+      return card;
+    }));
+  }
+  document.getElementById('go').addEventListener('click', () => {
+    const q = document.getElementById('q').value.trim().toLowerCase();
+    // Поиск по первому слову запроса, город — только выбранный из подсказки.
+    const word = q.split(/\s+/)[0];
+    setTimeout(() => render(ALL.filter((v) => (!word || v.t.toLowerCase().includes(word)) && (!sel.city || v.c === sel.city))), 300);
+    window.__searched = { q, city: sel.city };
+  });
+  // До поиска — «популярные» вакансии, не по профилю.
+  setTimeout(() => render(ALL.slice(3)), 200);
+</script>
+</body></html>

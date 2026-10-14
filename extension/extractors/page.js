@@ -81,7 +81,7 @@
   // предку, где нет ссылок на другие вакансии. Не зависит от CSS-классов.
   function cardsByLinks(re, root = document, { skipChrome = false } = {}) {
     const byId = new Map();
-    const idOf = (a) => { const m = a.href.match(re); return m ? (m[1] || m[0]) : null; };
+    const idOf = typeof re === 'function' ? re : (a) => { const m = a.href.match(re); return m ? (m[1] || m[0]) : null; };
     for (const a of root.querySelectorAll('a[href]')) {
       const id = idOf(a);
       if (!id || (skipChrome && inChrome(a))) continue;
@@ -318,24 +318,54 @@
   const GENERIC_LINK_TEXT = /^(подробнее|откликнуться|смотреть|посмотреть|узнать (?:больше|подробнее)|перейти|читать|details|apply|more|view|открыть)$/i;
   const MORE_RE = /^(показать|загрузить|смотреть|ещё|еще)\s*(ещё|еще|больше)?(\s+ваканси\S*)?$|^(show|load)\s+more|^ещё\s+\d+/i;
 
-  function genericParse(root, cfg) {
-    const listPath = location.pathname.replace(/\/+$/, '');
+  // В ссылке есть номер вакансии: /vacancy/47123456, /vakansii/smm-46123456.html, uuid.
+  const HAS_ID = /\d{4,}|[0-9a-f]{8}-[0-9a-f]{4}-/i;
+  // Шаблон ссылки: сегмент с номером заменяем на «:id». Ссылки одного шаблона — карточки одного списка.
+  const NOT_JOBS = /^(blog|news|novosti|press|media|article|articles|stati|statya|event|events|promo|product|products|catalog|shop|tovar|tag|tags|author|help|faq|company|companies|employer|reviews|otzyvy)$/i;
+  function linkTemplate(href, origin) {
+    try {
+      const u = new URL(href);
+      if (u.origin !== origin) return null;
+      const segs = u.pathname.split('/').filter(Boolean);
+      let idIdx = -1;
+      segs.forEach((x, i) => { if (HAS_ID.test(x)) idIdx = i; });
+      if (idIdx < 0 || segs.slice(0, idIdx).some((x) => NOT_JOBS.test(x))) return null;
+      return { tpl: segs.map((x, i) => (i === idIdx ? ':id' : x)).join('/'), id: segs[idIdx] };
+    } catch { return null; }
+  }
+  // Сайт без слов «vacancy/job» в ссылках (например, /search/4219605): ищем самый
+  // многочисленный шаблон ссылок с номером внутри страницы (не в шапке и не в подвале).
+  function clusterRe(root, here) {
+    const groups = new Map();
+    for (const a of root.querySelectorAll('a[href]')) {
+      if (inChrome(a)) continue;
+      const t = linkTemplate(a.href, here.origin);
+      if (!t) continue;
+      if (!groups.has(t.tpl)) groups.set(t.tpl, new Set());
+      groups.get(t.tpl).add(t.id);
+    }
+    const best = [...groups].filter(([, ids]) => ids.size >= 2).sort((x, y) => y[1].size - x[1].size)[0];
+    if (!best) return null;
+    return (a) => { const t = linkTemplate(a.href, here.origin); return t && t.tpl === best[0] ? t.id : null; };
+  }
+
+  function genericParse(root, cfg, here = location) {
+    const listPath = here.pathname.replace(/\/+$/, '');
     if (cfg.itemSelector) {
       return [...root.querySelectorAll(cfg.itemSelector)].map((card) => {
         const a = (cfg.linkSelector && card.querySelector(cfg.linkSelector)) || (card.matches('a[href]') ? card : card.querySelector('a[href]'));
         const t = cfg.titleSelector ? card.querySelector(cfg.titleSelector) : null;
-        const url = (a?.href || location.href).split('#')[0];
+        const url = (a?.href || here.href).split('#')[0];
         return { externalId: url, url, title: text(t) || text(a), cardText: blockText(card).slice(0, 1500), snippet: blockText(card).slice(0, 600) };
       }).filter((it) => it.title);
     }
-    const re = cfg.linkPattern ? new RegExp(cfg.linkPattern, 'i') : JOB_LINK_RE;
-    return cardsByLinks(re, root, { skipChrome: true })
+    const toItems = (cards) => cards
       .filter(({ a }) => {
         try {
           const u = new URL(a.href);
           const p = u.pathname.replace(/\/+$/, '');
           // Ссылка на саму выдачу или на её «родителя» — это навигация, не вакансия.
-          return u.origin === location.origin ? p !== listPath && !listPath.startsWith(`${p}/`) : true;
+          return u.origin === here.origin ? p !== listPath && !listPath.startsWith(`${p}/`) : true;
         } catch { return false; }
       })
       .map(({ a, card }) => {
@@ -347,11 +377,164 @@
         return { externalId: url, url, title: title.slice(0, 160), cardText: blockText(card).slice(0, 1500), snippet: blockText(card).slice(0, 600) };
       })
       .filter((it) => it.title.length >= 4);
+    if (cfg.linkPattern) return toItems(cardsByLinks(new RegExp(cfg.linkPattern, 'i'), root, { skipChrome: true }));
+    let items = toItems(cardsByLinks(JOB_LINK_RE, root, { skipChrome: true }));
+    // Среди ссылок «/vakansii/…» есть и рубрики. Если у большинства вакансий в ссылке номер —
+    // ссылки без номера (рубрики, подборки) отбрасываем.
+    const withId = items.filter((it) => HAS_ID.test(new URL(it.url).pathname));
+    if (withId.length >= 3 && withId.length < items.length) items = withId;
+    if (items.length >= 2) return items;
+    const byTpl = clusterRe(root, here);
+    const more = byTpl ? toItems(cardsByLinks(byTpl, root, { skipChrome: true })) : [];
+    return more.length > items.length ? more : items;
+  }
+
+  // Сайты-приложения (React/Next/Vue) часто кладут список вакансий в JSON внутри страницы.
+  const TITLE_KEYS = ['title', 'name', 'vacancyName', 'vacancyTitle', 'jobTitle', 'position', 'positionName', 'header'];
+  const ID_KEYS = ['id', 'vacancyId', 'vacancy_id', 'uuid', 'slug', 'code', 'externalId', 'guid'];
+  const URL_KEYS = ['url', 'link', 'href', 'vacancyUrl', 'alternate_url', 'absoluteUrl', 'publicUrl'];
+  const JOB_KEY = /salary|zarplat|city|location|region|address|employ|company|employer|schedule|experience|description|requirement|duties|vacanc|publish|grade|remote|format/i;
+  const str = (v) => (v == null ? '' : typeof v === 'string' || typeof v === 'number' ? String(v) : typeof v === 'object' ? str(v.name ?? v.title ?? v.value ?? v.text ?? '') : '');
+  function jsonJobs(root, pageUrl) {
+    const blobs = [];
+    for (const sc of root.querySelectorAll('script')) {
+      const t = (sc.textContent || '').trim();
+      if (t.length < 50 || sc.type === 'application/ld+json') continue;
+      if (sc.type === 'application/json' || sc.id === '__NEXT_DATA__' || sc.id === '__NUXT_DATA__') { try { blobs.push(JSON.parse(t)); } catch { /* не JSON */ } continue; }
+      const m = t.match(/^(?:window\.)?[\w$.[\]'"]+\s*=\s*(\{[\s\S]*\}|\[[\s\S]*\])\s*;?\s*$/);
+      if (m) { try { blobs.push(JSON.parse(m[1])); } catch { /* не JSON */ } }
+    }
+    const titleOf = (x) => TITLE_KEYS.map((k) => x[k]).find((v) => typeof v === 'string' && v.trim().length >= 3 && v.length <= 160);
+    const idOf = (x) => ID_KEYS.map((k) => x[k]).find((v) => (typeof v === 'string' || typeof v === 'number') && String(v).length >= 1);
+    const urlOf = (x) => URL_KEYS.map((k) => x[k]).find((v) => typeof v === 'string' && /^(https?:\/\/|\/)/.test(v));
+    const jobLike = (x) => x && typeof x === 'object' && !Array.isArray(x) && titleOf(x) && (idOf(x) != null || urlOf(x)) && Object.keys(x).some((k) => JOB_KEY.test(k));
+    let best = [];
+    let seen = 0;
+    const visit = (o, depth) => {
+      if (!o || typeof o !== 'object' || depth > 14 || seen++ > 200000) return;
+      if (Array.isArray(o)) {
+        const jobs = o.filter(jobLike);
+        if (jobs.length >= 2 && jobs.length >= o.length * 0.6 && jobs.length > best.length) best = jobs;
+        for (const x of o) visit(x, depth + 1);
+        return;
+      }
+      for (const v of Object.values(o)) visit(v, depth + 1);
+    };
+    blobs.forEach((b) => visit(b, 0));
+    const anchors = [...root.querySelectorAll('a[href]')];
+    return best.map((x) => {
+      const id = idOf(x);
+      const own = urlOf(x);
+      let url = own ? new URL(own, pageUrl).href : null;
+      if (!url && id != null && String(id).length >= 3) url = anchors.find((a) => a.href.includes(String(id)))?.href || null;
+      url = (url || `${pageUrl.split('#')[0]}#${encodeURIComponent(String(id ?? titleOf(x)))}`);
+      const sal = x.salary && typeof x.salary === 'object' ? x.salary : {};
+      const from = x.salaryFrom ?? x.salary_from ?? sal.from ?? sal.min;
+      const to = x.salaryTo ?? x.salary_to ?? sal.to ?? sal.max;
+      const salaryText = from || to ? `${from ? `от ${from}` : ''} ${to ? `до ${to}` : ''} ${str(sal.currency) || 'руб.'}` : typeof x.salary === 'string' ? x.salary : '';
+      const desc = [x.description, x.shortDescription, x.short_description, x.requirements, x.responsibilities, x.duties, x.snippet, x.announce].map(str).filter(Boolean).join('\n');
+      return {
+        externalId: url,
+        url,
+        title: clean(titleOf(x)).slice(0, 160),
+        company: clean(str(x.company) || str(x.employer) || str(x.companyName) || str(x.organization)),
+        location: clean(str(x.city) || str(x.location) || str(x.region) || str(x.address) || str(x.area)),
+        salaryText,
+        description: htmlToText(desc).slice(0, 4000),
+        formatText: [str(x.schedule), str(x.workFormat), str(x.format), str(x.employment), x.remote ? 'удалённо' : ''].filter(Boolean).join(', '),
+        publishedText: str(x.publishedAt || x.published_at || x.datePublished || x.publicationDate || x.createdAt || x.created_at || x.date),
+      };
+    });
+  }
+
+  // ---------------- Поля поиска на сайте ----------------
+  // Находим на странице поле «должность / поиск» и поле «город», вписываем значения
+  // из профиля и жмём «Найти». Работает на большинстве сайтов: формы, React, Vue.
+  const QUERY_HINT = /должност|ваканс|vacanc|професс|ключев|поиск|search|query|keyword|запрос|найти|искать|what|position|title|text/i;
+  const CITY_HINT = /город|регион|местополож|населён|населен|city|location|region|area|метро/i;
+  const BAD_INPUT = /mail|почт|phone|телефон|парол|password|login|логин|промокод|coupon|подпис|subscribe|имя|name\b/i;
+  const inputHints = (el) => [el.placeholder, el.getAttribute('aria-label'), el.name, el.id, el.title, el.labels?.[0]?.textContent].filter(Boolean).join(' ');
+  const shown = (el) => { const r = el.getBoundingClientRect(); return r.width > 30 && r.height > 8 && getComputedStyle(el).visibility !== 'hidden'; };
+  const norm = (v) => (v || '').toLowerCase().replace(/ё/g, 'е').replace(/[^a-zа-я0-9]+/g, ' ').trim();
+
+  function findSearchInputs() {
+    const inputs = [...document.querySelectorAll('input:not([type]), input[type="text"], input[type="search"]')]
+      .filter((el) => shown(el) && !el.disabled && !el.readOnly);
+    let query = null;
+    let city = null;
+    let best = 0;
+    for (const el of inputs) {
+      const hint = inputHints(el);
+      if (BAD_INPUT.test(hint) && !QUERY_HINT.test(hint)) continue;
+      if (CITY_HINT.test(hint) && !/должност|ваканс|професс/i.test(hint)) { city ||= el; continue; }
+      let score = 0;
+      if (QUERY_HINT.test(hint)) score += 3;
+      if (el.type === 'search' || el.getAttribute('role') === 'searchbox' || el.getAttribute('enterkeyhint') === 'search') score += 2;
+      if (!inChrome(el)) score += 1;
+      score += Math.min(2, el.getBoundingClientRect().width / 400);
+      if (score >= 3 && score > best) { best = score; query = el; }
+    }
+    return { query, city };
+  }
+
+  // Значение «как будто ввёл человек»: React и Vue узнают об изменении по событию input.
+  function setValue(el, v) {
+    el.focus();
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(el, v);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  function pressEnter(el) {
+    for (const type of ['keydown', 'keypress', 'keyup']) el.dispatchEvent(new KeyboardEvent(type, { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+  }
+
+  // Город выбираем из подсказки сайта: просто текст в поле многие сайты не принимают.
+  async function pickCity(input, city) {
+    const prev = input.value;
+    setValue(input, city);
+    const want = norm(city);
+    const option = await waitFor(() => [...document.querySelectorAll('[role="option"], li, [class*="suggest" i] *, [class*="option" i], [class*="dropdown" i] *, [class*="autocomplete" i] *, [class*="popup" i] *')]
+      .filter((o) => o !== input && !o.contains(input) && shown(o) && norm(text(o)).startsWith(want) && text(o).length < 90)
+      .sort((x, y) => text(x).length - text(y).length)[0], 4000);
+    if (option) { option.click(); await sleep(600); return true; }
+    setValue(input, prev);
+    return false;
+  }
+
+  function submitNear(input) {
+    const scope = input.form || input.closest('[role="search"], [class*="search" i], [class*="filter" i]') || input.parentElement?.parentElement?.parentElement || document.body;
+    const buttons = [...scope.querySelectorAll('button, input[type="submit"], [role="button"], a')].filter(shown);
+    const label = (b) => (text(b) || b.value || b.getAttribute('aria-label') || b.title || '').trim();
+    const byText = buttons.find((b) => /^(найти|искать|поиск|показать|применить|search|find)(\s|$)/i.test(label(b)) || (b.type === 'submit' && !/сброс|очист|reset/i.test(label(b))));
+    if (byText) { byText.click(); return 'кнопка'; }
+    if (input.form) { try { input.form.requestSubmit(); return 'форма'; } catch { /* нет кнопки отправки */ } }
+    // Кнопка-иконка с лупой справа от поля.
+    const r = input.getBoundingClientRect();
+    const icon = buttons.find((b) => !label(b).replace(/\s/g, '') && b.querySelector('svg, img, i') && Math.abs(b.getBoundingClientRect().top - r.top) < 40);
+    if (icon) { icon.click(); return 'кнопка'; }
+    pressEnter(input);
+    return 'Enter';
+  }
+
+  async function fillSearch(cfg) {
+    await sleep(cfg.waitMs ?? 1500);
+    const { query: qIn, city: cIn } = await waitFor(() => { const r = findSearchInputs(); return r.query || r.city ? r : null; }, 3000) || {};
+    const out = { found: Boolean(qIn), cityFound: Boolean(cIn), query: null, city: null, submitted: null };
+    if (cIn && cfg.city && !norm(cIn.value).includes(norm(cfg.city))) {
+      if (await pickCity(cIn, cfg.city)) out.city = cfg.city;
+    }
+    if (qIn && cfg.query && norm(qIn.value) !== norm(cfg.query)) {
+      setValue(qIn, cfg.query);
+      out.query = cfg.query;
+      await sleep(400);
+    }
+    if (out.query || out.city) out.submitted = submitNear(qIn || cIn);
+    return out;
   }
 
   // Кнопка «Показать ещё» на сайтах, которые подгружают список без перехода.
   async function clickMore(cfg, countNow) {
-    for (let i = 0; i < (cfg.moreClicks ?? 10); i++) {
+    for (let i = 0; i < (cfg.moreClicks ?? 30); i++) {
       if (countNow() >= cfg.limit) return;
       const btn = [...document.querySelectorAll('button, a, [role="button"]')]
         .find((b) => MORE_RE.test(text(b)) && b.offsetParent !== null && !inChrome(b));
@@ -366,7 +549,7 @@
 
   // Сайты, которые подгружают список при прокрутке (бесконечная лента).
   async function scrollLoad(cfg, countNow) {
-    for (let i = 0; i < (cfg.scrollRounds ?? 12); i++) {
+    for (let i = 0; i < (cfg.scrollRounds ?? 25); i++) {
       if (countNow() >= cfg.limit) return;
       const before = countNow();
       window.scrollTo(0, document.body.scrollHeight);
@@ -383,10 +566,10 @@
     return `на странице ${links.length} ссылок, вакансии не распознаны${sample.length ? ` (например: ${sample.join(', ')})` : ''}. Укажите шаблон ссылки в «Ручной настройке».`;
   }
 
-  function genericNext() {
-    const rel = document.querySelector('a[rel="next"]');
+  function genericNext(root = document) {
+    const rel = root.querySelector('a[rel="next"]');
     if (rel?.href) return rel.href;
-    const a = [...document.querySelectorAll('a[href]')].find((x) => /^(далее|следующая|вперёд|вперед|next|›|»|→)$/i.test(text(x)) && !inChrome(x));
+    const a = [...root.querySelectorAll('a[href]')].find((x) => /^(далее|следующая|вперёд|вперед|next|›|»|→)$/i.test(text(x)) && !inChrome(x));
     return a?.href || null;
   }
 
@@ -427,11 +610,12 @@
         if (ld.length) items = ld.map((j) => fromJsonLd(j, location.href));
         else {
           const count = () => genericParse(document, cfg).length;
-          await waitFor(() => count() > 0, 15000);
+          await waitFor(() => count() > 0 || jsonJobs(document, location.href).length > 0, 15000);
           await gentleScroll(4);
           await clickMore(cfg, count);
           await scrollLoad(cfg, count);
           items = genericParse(document, cfg);
+          if (!items.length) items = jsonJobs(document, location.href);
           if (!items.length) error = diagnose();
         }
         nextUrl = genericNext();
@@ -482,5 +666,30 @@
     return { ...d, pageTitle: d.pageTitle || text(document.querySelector('h1')), enriched: true, url: location.href };
   }
 
-  globalThis.__jobRadar = { extract, details, current, detectPlatform };
+  // Режим «без вкладки»: страницу скачали запросом (сайты банков в Яндекс Браузере
+  // закрыты для расширений во вкладке) и разбираем её здесь.
+  function parseDoc(html, url) {
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    const b = doc.createElement('base');
+    b.href = url;
+    doc.head.prepend(b);
+    return doc;
+  }
+  function parseHtml(html, url, cfg = {}) {
+    const doc = parseDoc(html, url);
+    const here = new URL(url);
+    const ld = jsonLdJobs(doc);
+    let items = ld.length ? ld.map((j) => fromJsonLd(j, url)) : genericParse(doc, cfg, here);
+    if (!items.length) items = jsonJobs(doc, url);
+    const reason = detectBlock(doc, items.length);
+    const next = genericNext(doc);
+    return { platform: 'generic', items: items.slice(0, cfg.limit || 1000), total: cfg.pageNo ? null : totalFrom(doc, 'generic'), nextUrl: next && next !== url ? next : null, blocked: Boolean(reason), reason, error: items.length ? null : 'браузер не пускает расширение на этот сайт во вкладке, а в скачанной странице вакансий нет (сайт рисует их скриптом). Вставьте ссылку на страницу с уже выполненным поиском (с должностью в адресе)', url, title: doc.title };
+  }
+  function detailHtml(html, url) {
+    const doc = parseDoc(html, url);
+    const d = genericDetail(doc, url);
+    return { ...d, pageTitle: d.pageTitle || text(doc.querySelector('h1')), enriched: true };
+  }
+
+  globalThis.__jobRadar = { extract, details, current, detectPlatform, fillSearch, parseHtml, detailHtml };
 })();

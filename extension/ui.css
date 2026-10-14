@@ -154,6 +154,9 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .limit .on { background: #fff; color: var(--red); border-color: #fff; }
 .limit input#limitInput:focus { outline: none; border-color: #fff; background: rgba(255, 255, 255, .14); }
 .limit input#limitInput.on { background: #fff; color: var(--red); }
+.limit-hint { opacity: .85; font-weight: 500; white-space: nowrap; cursor: help; }
+.limit-hint:empty { display: none; }
+.limit-hint.warn::before { content: '⚠ '; }
 .find-row { display: flex; gap: 1.6cqw; }
 .find {
   position: relative; overflow: hidden; flex: 1; min-width: 0;
@@ -462,3 +465,9 @@ body.popup { width: 330px; padding: 14px; }
 /* Поделиться: шаги установки для другого человека */
 .steps { margin: 12px 0 0; padding-left: 20px; display: grid; gap: 6px; color: var(--muted, #6b6b6b); line-height: 1.45; }
 .steps li::marker { font-weight: 700; color: var(--ink, #111); }
+
+/* Что подставлено в поля сайта из профиля */
+.src-fill { margin-top: 4px; font-size: 13px; color: var(--muted); }
+.src-fill b { color: var(--ink); font-weight: 600; }
+.src-autofill { display: inline-flex; align-items: center; gap: 6px; margin-top: 6px; font-size: 13px; color: var(--muted); cursor: pointer; }
+.note-warn { margin: 8px 0 0; padding: 10px 12px; border-radius: 12px; background: var(--warn-soft); color: var(--warn); font-size: 13px; line-height: 1.45; }

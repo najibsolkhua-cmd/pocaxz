@@ -42,6 +42,16 @@ function route(url) {
   if (p === '/careers/jobs/data-engineer-502') return '<!doctype html><meta charset="utf-8"><main><h1>Data Engineer</h1><p>Airflow, Spark, ClickHouse, Python. Удалённо.</p></main>';
   if (p.startsWith('/careers/')) return '<!doctype html><meta charset="utf-8"><main><h1>О нас</h1><p>Мы большая компания.</p></main>';
   if (p === '/captcha') return fx('captcha.html');
+  if (p === '/hr') return fx('hr-search.html');
+  if (/^\/hr\/search\/\d+$/.test(p)) return `<!doctype html><meta charset="utf-8"><main><h1>Python backend-разработчик</h1><p>Москва. FastAPI, PostgreSQL, Kafka, Docker. Гибрид. ${p}</p></main>`;
+  if (p === '/board') {
+    const q = (u.searchParams.get('query') || '').toLowerCase();
+    const list = q.includes('python') ? [[7001, 'Python backend-разработчик'], [7002, 'Python-разработчик (backend, FastAPI)']] : [[7100, 'Повар'], [7101, 'Грузчик']];
+    return `<!doctype html><meta charset="utf-8"><main><h1>Вакансии: ${q}</h1>${list.map(([id, t]) => `<div class="v"><a href="/board/vacancy/${id}">${t}</a><p>Москва · ООО Доска · Python, FastAPI</p></div>`).join('')}</main>`;
+  }
+  if (p.startsWith('/board/vacancy/')) return '<!doctype html><meta charset="utf-8"><main><h1>Python backend-разработчик</h1><p>Москва, гибрид. Python, FastAPI, PostgreSQL.</p></main>';
+  if (p === '/spa') return fx('spa-json.html');
+  if (p.startsWith('/spa/vacancy/')) return '<!doctype html><meta charset="utf-8"><main><h1>Python backend-разработчик</h1><p>Москва. Python, FastAPI, Kafka, PostgreSQL, Docker. Гибрид.</p></main>';
   return null;
 }
 
@@ -236,6 +246,7 @@ try {
     const [tw, dw] = await page.evaluate(() => ['clockText', 'clockDate'].map((id) => document.getElementById(id).getBBox().width));
     assert.ok(Math.abs(tw - dw) / tw < 0.08, `время и дата одной ширины: ${tw} / ${dw}`);
     assert.ok(await page.locator('#accessBar').isHidden(), 'доступ к сайтам есть — плашки нет');
+    assert.ok((await page.locator('#searchTile').textContent()).includes('включится после первого поиска'), 'до первого поиска автопоиск не запускается');
     assert.ok(await page.locator('.limit button.on', { hasText: '100' }).count(), 'по умолчанию 100');
     await page.locator('#limitInput').fill('250');
     await page.locator('#limitInput').press('Enter');
@@ -281,6 +292,13 @@ try {
     await waitIdle(page);
     await until(() => page.locator('#findText').textContent().then((t) => t === '/ Найти работу'), 5000, 'кнопка вернулась');
     await page.locator('.toast.show', { hasText: 'Поиск завершён' }).waitFor({ timeout: 8000 });
+    const st = await storage(page);
+    assert.equal(st.autoArmed, true, 'после первого поиска автопоиск включён');
+    // 100 вакансий на 6 источников: по ~20 (не меньше страницы), а не по 100 на каждый;
+    // что не добрали первые источники (там нет новых), достаётся следующим.
+    const q = st['srcstate:av'].lastQuota;
+    assert.ok(q >= 20 && q <= 34, `доля источника: ${q}`);
+    assert.ok(await page.locator('#limitHint').textContent(), 'подсказка, как делится лимит');
   });
 
   let all = await storage(page);
@@ -436,7 +454,7 @@ try {
     await waitIdle(page, 30000);
     await until(() => page.locator('#stopBtn').isHidden(), 5000, 'кнопка «Стоп» скрылась');
     const st = await storage(page);
-    assert.ok(Object.keys(st).some((k) => k.startsWith('srcstate:') && st[k].lastStatus === 'stopped'), 'источник помечен «остановлено»');
+    assert.ok(Object.keys(st).some((k) => k.startsWith('srcstate:') && st[k].lastStatus === 'stopped'), `источник помечен «остановлено»: ${Object.keys(st).filter((k) => k.startsWith('srcstate:')).map((k) => `${k}=${st[k].lastStatus}@${st[k].lastRunAt}`).join(', ')}`);
     // После «Стоп» следующий поиск у каждого источника — не раньше его интервала.
     for (const s of st.sources.filter((x) => x.enabled)) {
       const next = Date.parse(st[`srcstate:${s.id}`]?.nextRunAt || 0);
@@ -474,6 +492,48 @@ try {
     await page.evaluate(() => { location.hash = ''; });
     await until(async () => (await page.locator('#appliedTile .mini-title').count()) === 1, 5000, 'отклик первого профиля вернулся');
     assert.equal((await storage(page)).profile.name, 'Иван');
+  });
+
+  await step('повторный поиск по источнику — только новые вакансии, без лишних страниц', async () => {
+    await page.evaluate(() => chrome.runtime.sendMessage({ type: 'runNow', sourceId: 'hh' }));
+    await waitIdle(page);
+    const st = (await storage(page))['srcstate:hh'];
+    assert.equal(st.lastFresh, 0, 'новых нет');
+    assert.equal(st.lastPages, 1, 'первая страница целиком из известных — дальше не листаем');
+  });
+
+  await step('сайты: должность и город сами вписываются в поля, ссылка с параметром, страница без карточек', async () => {
+    await page.evaluate(async (b) => {
+      const { sources } = await chrome.storage.local.get('sources');
+      const mk = (id, name, url, cfg = {}) => ({ id, platform: 'generic', name, url, intervalMin: 360, enabled: false, cfg });
+      await chrome.storage.local.set({ sources: [...sources, mk('hr', 'Тополь: поиск', `${b}/hr`), mk('board', 'Доска', `${b}/board?query=%D0%BF%D0%BE%D0%B2%D0%B0%D1%80&page=1`), mk('spa', 'Банк: карьера', `${b}/spa`, { fetchMode: true })] });
+    }, base);
+    for (const id of ['hr', 'board', 'spa']) {
+      await page.evaluate((x) => chrome.runtime.sendMessage({ type: 'runNow', sourceId: x }), id);
+      await waitIdle(page);
+    }
+    const st = await storage(page);
+    const titles = (src) => Object.values(st).filter((x) => x?.key?.startsWith('v:generic:') && (x.sources || []).includes(src)).map((x) => x.title).sort();
+    // Форма без параметров в ссылке: город выбран из подсказки, должность вписана, нажато «Искать».
+    assert.deepEqual(titles('Тополь: поиск'), ['Ведущий Python-разработчик (backend)', 'Python backend-разработчик'].sort(), `hr: ${titles('Тополь: поиск')}`);
+    assert.deepEqual(st['srcstate:hr'].filled, { query: 'Python backend-разработчик', city: 'Москва', via: 'поля сайта' });
+    // Ссылка с ?query=повар: должность из профиля подставлена в ссылку, остальные параметры целы.
+    const board = st.sources.find((x) => x.id === 'board');
+    assert.equal(new URL(board.url).searchParams.get('query'), 'Python backend-разработчик');
+    assert.equal(new URL(board.url).searchParams.get('page'), '1');
+    assert.ok(titles('Доска').every((t) => /python/i.test(t)) && titles('Доска').length === 2, `board: ${titles('Доска')}`);
+    assert.equal(st['srcstate:board'].filled.via, 'ссылка');
+    // Сайт рисует список скриптом из JSON — читаем без вкладки (как сайты банков в Яндекс Браузере).
+    const spa = Object.values(st).filter((x) => x?.key?.startsWith('v:generic:') && (x.sources || []).includes('Банк: карьера'));
+    assert.equal(spa.length, 3, `spa: ${spa.map((x) => x.title)}`);
+    const py = spa.find((x) => x.title === 'Python backend-разработчик');
+    assert.ok(py.url.endsWith('/spa/vacancy/9001') && py.company === 'Банк Ромашка' && py.salary?.from === 250000, JSON.stringify(py));
+    assert.equal(st['srcstate:spa'].lastStatus, 'ok');
+    // В панели «Сайты компаний» видно, что подставлено, и есть переключатель.
+    await page.evaluate(() => { location.hash = 'generic'; });
+    await page.locator('.drawer.open .src-fill', { hasText: 'Подставлено в поля сайта' }).waitFor();
+    assert.ok(await page.locator('.drawer.open .src-autofill').count() >= 3);
+    await page.locator('.drawer-close').click();
   });
 
   await step('сбор с открытой вкладки (кнопка в меню расширения)', async () => {

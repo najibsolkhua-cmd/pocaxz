@@ -112,3 +112,23 @@ test('смена должности меняет её в ссылках hh.ru и
   assert.ok(decodeURIComponent(src.find((s) => s.auto === 'hh').url).includes('text=Таргетолог OR "Специалист по таргету"'));
   assert.equal(new URL(src.find((s) => s.auto === 'avito').url).searchParams.get('q'), 'Таргетолог');
 });
+
+test('сайты: должность из профиля подставляется в параметр поиска ссылки', () => {
+  const p = { position: 'Маркетолог (digital)' };
+  const u = new URL(store.retargetGenericUrl('https://www.tbank.ru/career/vacancies/all/saint-petersburg/?cityId=c2&searchQuery=%D0%BF%D1%80%D0%BE%D0%B4%D0%B0%D0%B2%D0%B5%D1%86', p));
+  assert.equal(u.searchParams.get('searchQuery'), 'Маркетолог');
+  assert.equal(u.searchParams.get('cityId'), 'c2');
+  assert.equal(new URL(store.retargetGenericUrl('https://spb.rabota.ru/vacancy/?query=python&sort=relevance', p)).searchParams.get('query'), 'Маркетолог');
+  assert.equal(store.retargetGenericUrl('https://spb.rabota.ru/vacancy/?query=маркетолог', p), null, 'уже стоит');
+  assert.equal(store.retargetGenericUrl('https://rabota.sber.ru/search', p), null, 'параметра нет — заполним поля на сайте');
+  assert.equal(store.retargetGenericUrl('https://x.ru/jobs?q=1', { position: '' }), null);
+});
+
+test('лимит на поиск делится между источниками, но не меньше страницы на источник', () => {
+  assert.deepEqual(store.budgetPlan(3, 100), { per: 34, total: 102, deep: false });
+  assert.deepEqual(store.budgetPlan(200, 100), { per: 20, total: 4000, deep: true });
+  assert.equal(store.budgetPlan(5, 10).per, 10, 'маленький лимит — не больше самого лимита');
+  assert.equal(store.shareFor(100, 1, 100), 100);
+  // Первый источник добрал мало — остаток уходит следующим.
+  assert.equal(store.shareFor(100 - 5, 2, 100), 48);
+});

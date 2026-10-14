@@ -35,6 +35,8 @@
  "lib/store.js",
  "lib/zip.js",
  "manifest.json",
+ "offscreen.html",
+ "offscreen.js",
  "popup.html",
  "popup.js",
  "ui.css",

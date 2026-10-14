@@ -35,10 +35,22 @@ export const DEFAULT_SETTINGS = {
   openIn: 'tab',           // 'tab' — фоновая вкладка, 'window' — свёрнутое окно
   retentionDays: 45,       // удалять старые вакансии, которые вы не трогали
   manualEnrichMax: 10,     // сколько описаний подгружать при сборе с текущей вкладки
-  scanLimit: 100,          // сколько вакансий собирать с одного источника за поиск
+  scanLimit: 100,          // сколько вакансий проверить за один поиск — делится между источниками
   deepCheck: 30,           // у скольких лучших новых вакансий открывать полное описание
   pauseBetweenSources: [8000, 20000], // пауза между источниками, мс
 };
+
+// Лимит делится между источниками поровну, но не меньше ~страницы выдачи на источник:
+// проверить 1–2 вакансии с сайта стоит столько же, сколько целую страницу.
+export const MIN_SHARE = 20;
+export function shareFor(remaining, left, scanLimit) {
+  const floor = Math.min(MIN_SHARE, scanLimit);
+  return Math.max(Math.ceil(Math.max(0, remaining) / Math.max(1, left)), floor);
+}
+export function budgetPlan(n, scanLimit) {
+  const per = shareFor(scanLimit, n, scanLimit);
+  return { per, total: per * n, deep: n > 0 && n * Math.min(MIN_SHARE, scanLimit) > scanLimit };
+}
 
 export const PLATFORM_DEFAULTS = {
   hh: { intervalMin: 120, cfg: { enrichMax: 10, enrichDelay: [3000, 8000] } },
@@ -291,6 +303,29 @@ export function retargetSearchUrl(url, platform, profile, prevPosition) {
 
 // Создаём/обновляем поиски hh.ru и Avito по должности. Если должность сменилась —
 // меняем её и во всех ссылках hh/Avito, где стояла прежняя должность.
+// ---------- Поля поиска на любых сайтах ----------
+// Параметры адреса, в которых сайты обычно держат текст поиска.
+const QUERY_PARAMS = ['query', 'q', 'text', 'keyword', 'keywords', 'search', 'searchquery', 'search_query', 'searchtext', 'search_text', 's', 'position', 'vacancy', 'term', 'kw', 'what'];
+
+export function searchQueryFor(profile) {
+  return titleVariants(profile?.position)[0] || (profile?.position || '').trim();
+}
+
+// Подставляем должность в ссылку сайта, если у ссылки есть параметр поиска.
+// Если параметра нет — должность и город впишутся в поля на самой странице при поиске.
+export function retargetGenericUrl(url, profile) {
+  const q = searchQueryFor(profile);
+  if (!q) return null;
+  let u;
+  try { u = new URL(url); } catch { return null; }
+  const key = [...u.searchParams.keys()].find((k) => QUERY_PARAMS.includes(k.toLowerCase()));
+  if (!key || normQ(u.searchParams.get(key) || '') === normQ(q)) return null;
+  u.searchParams.set(key, q);
+  return u.toString();
+}
+
+export const autoFillOn = (src) => src.platform === 'generic' && src.autoFill !== false;
+
 export async function syncAutoSources(profile) {
   const query = (profile.position || '').trim();
   const sources = await getSources();
@@ -310,6 +345,16 @@ export async function syncAutoSources(profile) {
       changed = true;
     });
     await local.set({ autoPosition: query, autoRemoved: [] });
+  }
+  // Сайты компаний и job-сайты: должность в параметре поиска всегда из профиля.
+  if (query) {
+    sources.forEach((s, i) => {
+      if (!autoFillOn(s)) return;
+      const url = retargetGenericUrl(s.url, profile);
+      if (!url) return;
+      sources[i] = { ...s, url, name: sourceName(url, s.platform) };
+      changed = true;
+    });
   }
   for (const platform of ['hh', 'avito']) {
     const idx = sources.findIndex((s) => s.auto === platform);

@@ -64,7 +64,9 @@ async function planDue(settings, { force = false, sourceId = null } = {}) {
       if (!fresh) due.push(s);
       continue;
     }
-    if (!st.nextRunAt || Date.parse(st.nextRunAt) <= now) due.push(s);
+    // Новый источник автоматически не дёргаем: первый раз — по кнопке или через его интервал.
+    if (!st.nextRunAt) { await store.setSrcState(s.id, { ...st, nextRunAt: new Date(now + s.intervalMin * 60e3).toISOString() }); continue; }
+    if (Date.parse(st.nextRunAt) <= now) due.push(s);
   }
   return due;
 }
@@ -74,6 +76,7 @@ async function runQueue(due, settings) {
   const stop = keepAlive();
   try {
     progress = { total: due.length, done: 0, current: null, queue: due.map((s) => ({ id: s.id, platform: s.platform, name: s.name })), finishedAt: null };
+    let remaining = Number(settings.scanLimit) || 100;
     for (let i = 0; i < due.length; i++) {
       if (stopRequested) break;
       if (i > 0) await sleep(rand(...settings.pauseBetweenSources));
@@ -83,7 +86,11 @@ async function runQueue(due, settings) {
       progress.found = 0;
       progress.page = 0;
       progress.detail = 0;
-      await runSource(due[i], settings);
+      // Лимит на весь поиск делим между источниками; что не добрал один — достаётся следующим.
+      const quota = due.length === 1 ? settings.scanLimit : store.shareFor(remaining, due.length - i, settings.scanLimit);
+      progress.quota = quota;
+      const r = await runSource(due[i], settings, quota);
+      remaining -= r?.fresh || 0;
       progress.done++;
     }
     await cleanup(settings);
@@ -105,7 +112,11 @@ async function tick() {
   running = true;
   try {
     const settings = await store.getSettings();
-    const skip = !settings.autoRun || (settings.skipWhenLocked && (await chrome.idle.queryState(60)) === 'locked');
+    // Автопоиск включается только после первого поиска вручную: при первом заходе
+    // профиль ещё не заполнен, и искать «наугад» не нужно.
+    const { autoArmed, runs } = await chrome.storage.local.get(['autoArmed', 'runs']);
+    const armed = autoArmed ?? Boolean(runs?.length);
+    const skip = !armed || !settings.autoRun || (settings.skipWhenLocked && (await chrome.idle.queryState(60)) === 'locked');
     const due = skip ? [] : await planDue(settings);
     if (!due.length) { running = false; return; }
     await runQueue(due, settings);
@@ -121,10 +132,12 @@ async function startManual(sourceId) {
   running = true;
   try {
     const settings = await store.getSettings();
+    await chrome.storage.local.set({ autoArmed: true });
     const due = await planDue(settings, { force: true, sourceId });
     if (!due.length) { running = false; return { started: false, total: 0 }; }
     runQueue(due, settings).catch(console.error);
-    return { started: true, total: due.length };
+    const plan = store.budgetPlan(due.length, settings.scanLimit);
+    return { started: true, total: due.length, per: due.length === 1 ? settings.scanLimit : plan.per, deep: due.length > 1 && plan.deep };
   } catch (e) {
     running = false;
     throw e;
@@ -171,7 +184,7 @@ const extractInTab = async (tabId, cfg) => (await callInTab(tabId, 'extract', cf
 // Паузы между страницами выдачи и между карточками — как у человека.
 const PAGE_DELAY = { hh: [2500, 5000], avito: [4000, 8000], telegram: [1500, 3000], generic: [2000, 4000] };
 const DETAIL_DELAY = { hh: [2500, 6000], avito: [5000, 10000], generic: [2500, 5000], telegram: [2000, 4000] };
-const DETAIL_CAP = { hh: 50, avito: 10, generic: 10, telegram: 0 };
+const DETAIL_CAP = { hh: 50, avito: 10, generic: 20, telegram: 0 };
 const RECHECK_PER_RUN = { hh: 6, avito: 4, generic: 0, telegram: 0 };
 const MAX_PAGES = 100;
 
@@ -194,8 +207,18 @@ function navigate(tabId, url, timeout = 45e3) {
 
 // Подробности: для hh и Avito — запросом с той же вкладки, для сайтов компаний —
 // переходом на страницу (там часто всё рисует JavaScript).
-async function fetchDetails(tabId, platform, list) {
+async function fetchDetails(tabId, platform, list, mode = 'tab') {
   if (!list.length) return { results: {}, blocked: null };
+  if (mode === 'fetch') {
+    const results = {};
+    for (const it of list) {
+      if (stopRequested) break;
+      const r = await viaOffscreen('detail', it.url).catch((e) => ({ fail: String(e?.message || e) }));
+      results[it.externalId] = r.fail ? { error: r.fail } : r;
+      await sleep(rand(...DETAIL_DELAY.generic));
+    }
+    return { results, blocked: null };
+  }
   if (platform !== 'generic') {
     // Порциями по 3, чтобы «Стоп» срабатывал быстро.
     const results = {};
@@ -227,16 +250,71 @@ async function hasAccess(url) {
 }
 const NO_ACCESS = (url) => `Нет доступа к сайту ${new URL(url).hostname}. На главной нажмите «Разрешить доступ» (или в настройках расширения: «Доступ к сайтам» → «На всех сайтах»).`;
 
-async function runSource(src, settings) {
+const isPermError = (e) => /must request permission|Cannot access contents|cannot be scripted|extensions gallery/i.test(String(e?.message || e));
+
+// Режим «без вкладки». Яндекс Браузер включает защищённый режим на сайтах банков
+// (tbank.ru, rabota.sber.ru…) и не пускает туда расширения — такие страницы скачиваем
+// запросом и разбираем в скрытом документе расширения.
+let offscreenCreating = null;
+async function ensureOffscreen() {
+  if (!chrome.offscreen) throw new Error('браузер не умеет читать страницы без вкладки');
+  if (await chrome.offscreen.hasDocument?.()) return;
+  offscreenCreating ||= chrome.offscreen.createDocument({
+    url: 'offscreen.html',
+    reasons: ['DOM_PARSER'],
+    justification: 'Разбор страниц с вакансиями, закрытых для вкладок расширения',
+  }).catch((e) => { if (!/single offscreen/i.test(e.message)) throw e; }).finally(() => { offscreenCreating = null; });
+  await offscreenCreating;
+}
+async function viaOffscreen(type, url, cfg = {}) {
+  await ensureOffscreen();
+  return (await chrome.runtime.sendMessage({ target: 'offscreen', type, url, cfg })) || { fail: 'пустой ответ' };
+}
+
+// После «Найти» на сайте: ждём перехода на страницу результатов (или перерисовки списка).
+function settleAfterSubmit(tabId) {
+  return new Promise((resolve) => {
+    let started = false;
+    let done = false;
+    const timers = [];
+    const finish = () => {
+      if (done) return;
+      done = true;
+      timers.forEach(clearTimeout);
+      chrome.tabs.onUpdated.removeListener(listener);
+      setTimeout(resolve, rand(1800, 2800));
+    };
+    const listener = (id, info) => {
+      if (id !== tabId) return;
+      if (info.status === 'loading') started = true;
+      if (info.status === 'complete' && started) finish();
+    };
+    chrome.tabs.onUpdated.addListener(listener);
+    timers.push(setTimeout(() => { if (!started) finish(); }, 5000), setTimeout(finish, 45e3));
+  });
+}
+
+async function runSource(src, settings, quota = settings.scanLimit) {
   const started = new Date();
   const st = await store.getSrcState(src.id);
-  if (!(await hasAccess(src.url))) {
-    await store.setSrcState(src.id, { ...st, lastRunAt: started.toISOString(), nextRunAt: new Date(Date.now() + src.intervalMin * 60e3).toISOString(), lastStatus: 'failed', lastError: NO_ACCESS(src.url), failures: (st.failures || 0) + 1 });
-    await store.addRun({ at: started.toISOString(), source: src.name, sourceId: src.id, platform: src.platform, status: 'failed', found: 0, added: 0, error: NO_ACCESS(src.url), ms: 0 });
-    return { status: 'failed', found: 0, added: 0 };
+  const profile = await store.getProfile();
+  // Должность и город из профиля — в ссылку (если там есть параметр поиска) или в поля сайта.
+  const fill = store.autoFillOn(src) && profile.position ? { query: store.searchQueryFor(profile), city: (profile.cities || [])[0] || '' } : null;
+  const startUrl = (fill && store.retargetGenericUrl(src.url, profile)) || src.url;
+  if (startUrl !== src.url) {
+    const list = await store.getSources();
+    await store.saveSources(list.map((x) => (x.id === src.id ? { ...x, url: startUrl, name: store.sourceName(startUrl, x.platform) } : x)));
   }
-  const limit = Math.max(1, Math.min(Number(settings.scanLimit) || 100, 5000));
+  if (!(await hasAccess(startUrl))) {
+    await store.setSrcState(src.id, { ...st, lastRunAt: started.toISOString(), nextRunAt: new Date(Date.now() + src.intervalMin * 60e3).toISOString(), lastStatus: 'failed', lastError: NO_ACCESS(startUrl), failures: (st.failures || 0) + 1 });
+    await store.addRun({ at: started.toISOString(), source: src.name, sourceId: src.id, platform: src.platform, status: 'failed', found: 0, added: 0, error: NO_ACCESS(startUrl), ms: 0 });
+    return { status: 'failed', found: 0, added: 0, fresh: 0 };
+  }
+  quota = Math.max(1, Math.min(Number(quota) || 100, 5000));
+  const before0 = await store.getAll();
+  const isKnown = (it) => Boolean(before0[`v:${src.platform}:${String(it.externalId)}`]);
   const collected = new Map();
+  let fresh = 0; // новых для нас вакансий — только они расходуют лимит
   let total = null;
   let blocked = null;
   let error = null;
@@ -244,41 +322,91 @@ async function runSource(src, settings) {
   let stats = { found: 0, added: 0, updated: 0 };
   let detailed = 0;
   let archived = 0;
-  let handle;
+  let handle = null;
+  let mode = src.platform === 'generic' && (src.cfg?.fetchMode || st.mode === 'fetch') ? 'fetch' : 'tab';
+  // Что подставили из профиля — показываем у источника, чтобы можно было проверить.
+  let fillInfo = startUrl !== src.url ? { query: fill.query, via: 'ссылка' } : null;
   try {
-    handle = await openHidden(src.url, settings.openIn);
-    currentHandle = handle;
-    await waitTabComplete(handle.tabId);
-    await sleep(rand(1500, 3000));
-    let url = src.url;
-
-    // 1. Страницы выдачи — пока не наберём лимит или выдача не кончится.
-    for (;;) {
-      const cfg = { platform: src.platform, ...src.cfg, limit: limit - collected.size, pageNo: pages };
-      let res = await extractInTab(handle.tabId, cfg);
-      // Пустая страница без капчи — чаще всего сайт не успел догрузиться. Пробуем ещё раз.
-      if (!res.items?.length && !res.blocked && !stopRequested) {
-        await sleep(rand(2500, 4500));
+    let url = startUrl;
+    if (mode === 'tab') {
+      handle = await openHidden(url, settings.openIn);
+      currentHandle = handle;
+      await waitTabComplete(handle.tabId);
+      await sleep(rand(1500, 3000));
+      if (fill && !stopRequested) {
         try {
-          await navigate(handle.tabId, url);
-          res = await extractInTab(handle.tabId, { ...cfg, waitMs: 5000 });
-        } catch { /* оставляем первый результат */ }
+          const r = await callInTab(handle.tabId, 'fillSearch', { ...fill, waitMs: 600 });
+          if (r?.query || r?.city) {
+            fillInfo = { query: r.query || fillInfo?.query || null, city: r.city || null, via: 'поля сайта' };
+            if (r.submitted) await settleAfterSubmit(handle.tabId);
+            url = (await chrome.tabs.get(handle.tabId).catch(() => null))?.url || url;
+          }
+        } catch (e) {
+          if (!isPermError(e)) throw e;
+          mode = 'fetch';
+        }
+      }
+    }
+
+    // 1. Страницы выдачи — пока не наберём свою долю новых вакансий или выдача не кончится.
+    for (;;) {
+      const cfg = { platform: src.platform, ...src.cfg, limit: Math.max(1, quota - fresh) + (collected.size - fresh), pageNo: pages };
+      let res = null;
+      if (mode === 'tab') {
+        try {
+          res = await extractInTab(handle.tabId, cfg);
+          // Первая страница пустая и без капчи — чаще всего сайт не успел догрузиться.
+          if (!res.items?.length && !res.blocked && !stopRequested && pages === 0) {
+            await sleep(rand(2500, 4500));
+            try {
+              res = await extractInTab(handle.tabId, { ...cfg, waitMs: 4000 });
+              // Поиск сайта по должности ничего не дал (у сайта строгий поиск) — берём исходный список.
+              if (!res.items?.length && fillInfo?.via === 'поля сайта') {
+                await navigate(handle.tabId, startUrl);
+                url = startUrl;
+                res = await extractInTab(handle.tabId, { ...cfg, waitMs: 2500 });
+                fillInfo = { ...fillInfo, note: 'поиск сайта по должности ничего не нашёл — проверен весь список' };
+              } else if (!res.items?.length) {
+                await navigate(handle.tabId, url);
+                res = await extractInTab(handle.tabId, { ...cfg, waitMs: 5000 });
+              }
+            } catch { /* оставляем первый результат */ }
+          }
+        } catch (e) {
+          if (!isPermError(e) || src.platform !== 'generic') throw e;
+          mode = 'fetch';
+        }
+      }
+      if (mode === 'fetch') {
+        if (handle) { handle.close(); handle = null; currentHandle = null; }
+        res = await viaOffscreen('parse', url, cfg);
+        if (res.fail) { error = `не удалось скачать страницу: ${res.fail}`; break; }
       }
       pages++;
       if (pages === 1) total = res.total;
       if (res.error && !res.items?.length) error = res.error;
       if (res.blocked) { blocked = res.reason; break; }
       const before = collected.size;
-      for (const it of res.items || []) if (!collected.has(it.externalId) && collected.size < limit) collected.set(it.externalId, it);
+      let newOnPage = 0;
+      for (const it of res.items || []) {
+        if (collected.has(it.externalId)) continue;
+        const known = isKnown(it);
+        if (!known && fresh >= quota) continue;
+        collected.set(it.externalId, it);
+        if (!known) { fresh++; newOnPage++; }
+      }
       progress.found = collected.size;
       progress.page = pages;
-      if (stopRequested || collected.size >= limit || collected.size === before || !res.nextUrl || pages >= MAX_PAGES) break;
+      // Повторный поиск: если на странице только уже известные вакансии, дальше — старые.
+      if (stopRequested || fresh >= quota || collected.size === before || !newOnPage || !res.nextUrl || pages >= MAX_PAGES) break;
       url = res.nextUrl;
       await sleep(rand(...PAGE_DELAY[src.platform]));
-      try { await navigate(handle.tabId, url); } catch {
-        // Сеть моргнула — ещё одна попытка, потом сдаёмся и сохраняем собранное.
-        await sleep(rand(3000, 6000));
-        try { await navigate(handle.tabId, url); } catch (e) { error = String(e?.message || e); break; }
+      if (mode === 'tab') {
+        try { await navigate(handle.tabId, url); } catch {
+          // Сеть моргнула — ещё одна попытка, потом сдаёмся и сохраняем собранное.
+          await sleep(rand(3000, 6000));
+          try { await navigate(handle.tabId, url); } catch (e) { error = String(e?.message || e); break; }
+        }
       }
     }
 
@@ -291,7 +419,7 @@ async function runSource(src, settings) {
       const cand = await pickForDetails(items, src.platform, settings, want);
       if (cand.length) {
         progress.detail = cand.length;
-        const d = await fetchDetails(handle.tabId, src.platform, cand.map((c) => ({ externalId: c.externalId, url: c.url })));
+        const d = await fetchDetails(handle?.tabId, src.platform, cand.map((c) => ({ externalId: c.externalId, url: c.url })), mode);
         const enriched = [];
         for (const c of cand) {
           const r = d.results[c.externalId];
@@ -306,7 +434,7 @@ async function runSource(src, settings) {
     }
 
     // 3. Давно не встречавшиеся вакансии из вашего списка — не ушли ли в архив.
-    if (!blocked && !stopRequested && RECHECK_PER_RUN[src.platform]) {
+    if (!blocked && !stopRequested && mode === 'tab' && RECHECK_PER_RUN[src.platform]) {
       const stale = await pickForRecheck(src.platform, new Set(collected.keys()), settings);
       if (stale.length) {
         const d = await fetchDetails(handle.tabId, src.platform, stale);
@@ -324,21 +452,19 @@ async function runSource(src, settings) {
     }
 
     // Сайт компании показывает весь список: если вакансии нет два обхода подряд — её сняли.
-    if (src.platform === 'generic' && !blocked && !error && !stopRequested && collected.size && collected.size < limit) {
+    if (src.platform === 'generic' && !blocked && !error && !stopRequested && collected.size && fresh < quota && pages === 1) {
       archived += await archiveMissing(src, new Set(collected.keys()));
     }
   } catch (e) {
     // Вкладку закрыли по кнопке «Стоп» — это не ошибка.
     if (!stopRequested) {
       error = String(e?.message || e);
-      if (/must request permission|Cannot access contents/i.test(error)) {
-        // Доступ есть, а страница не читается — значит, она не загрузилась (страница ошибки
-        // браузера) или ушла на другой адрес. Иначе — доступ к сайту действительно закрыт.
+      if (isPermError(error)) {
         const tab = handle ? await chrome.tabs.get(handle.tabId).catch(() => null) : null;
-        const at = tab?.url || src.url;
+        const at = tab?.url || startUrl;
         error = /^https?:/i.test(at) && (await hasAccess(at))
-          ? `Страница ${new URL(src.url).hostname} не открылась или ушла на другой адрес. Откройте ссылку вручную: если сайт работает, повторите поиск.`
-          : NO_ACCESS(/^https?:/i.test(at) ? at : src.url);
+          ? `Страница ${new URL(startUrl).hostname} не открылась или ушла на другой адрес. Откройте ссылку вручную: если сайт работает, повторите поиск.`
+          : NO_ACCESS(/^https?:/i.test(at) ? at : startUrl);
       }
     }
   } finally {
@@ -376,9 +502,13 @@ async function runSource(src, settings) {
     lastTotal: total,
     lastFound: collected.size,
     lastAdded: stats.added,
+    lastFresh: fresh,
+    lastQuota: quota,
     lastDetailed: detailed,
     lastPages: pages,
-    lastLimit: limit,
+    lastLimit: settings.scanLimit,
+    mode: mode === 'fetch' && collected.size ? 'fetch' : null,
+    filled: fillInfo || st.filled || null,
     failures,
   });
   await store.addRun({
@@ -394,7 +524,7 @@ async function runSource(src, settings) {
     error: note,
     ms: Date.now() - started.getTime(),
   });
-  return { status, ...stats };
+  return { status, ...stats, fresh };
 }
 
 async function rescheduleAll() {
@@ -578,7 +708,13 @@ async function collectFromTab(tabId) {
   const settings = await store.getSettings();
   const tab = await chrome.tabs.get(tabId);
   const host = new URL(tab.url).hostname;
-  const res = await extractInTab(tabId, { platform: 'auto', limit: 1000 });
+  // Сайт закрыт для расширений во вкладке (защищённый режим) — читаем его без вкладки.
+  const res = await extractInTab(tabId, { platform: 'auto', limit: 1000 }).catch(async (e) => {
+    if (!isPermError(e)) throw e;
+    const r = await viaOffscreen('parse', tab.url, { limit: 1000 });
+    if (r.fail) throw new Error(r.fail);
+    return r;
+  });
   const src = `Вручную: ${host}`;
   const stats = await ingest(res.items || [], res.platform, src);
   let detailed = 0;
@@ -637,6 +773,7 @@ const handlers = {
 };
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg?.target === 'offscreen') return false;
   const h = handlers[msg?.type];
   if (!h) return false;
   Promise.resolve(h(msg)).then(sendResponse, (e) => sendResponse({ error: String(e?.message || e) }));
