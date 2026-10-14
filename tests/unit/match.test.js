@@ -44,3 +44,30 @@ test('без основного стека оценка ниже', () => {
   const noPy = scoreVacancy(vac({ title: 'Backend', snippet: 'Go, Docker, Redis' }), profile, now.getTime());
   assert.ok(withPy.score > noPy.score);
 });
+
+import { scoreAll } from '../../extension/lib/match.js';
+
+test('профессия вне IT: подбор по должности и тексту', () => {
+  const sales = {
+    position: 'Менеджер по продажам', about: 'B2B продажи, холодные звонки, ведение клиентов в CRM, переговоры',
+    grade: '', skills: [], minSalary: 0, formats: [], cities: [], stopWords: [], maxAgeDays: 30,
+  };
+  const mk = (title, snippet) => vac({ title, snippet });
+  const rows = scoreAll([
+    mk('Менеджер по продажам B2B', 'Поиск клиентов, холодные звонки, переговоры, CRM, план продаж'),
+    mk('Менеджер по работе с клиентами', 'Ведение клиентской базы, переговоры, CRM'),
+    mk('Python-разработчик', 'Django, PostgreSQL, Docker'),
+    mk('Водитель-экспедитор', 'Доставка грузов по городу, категория C'),
+  ], sales, '', now.getTime());
+  const by = Object.fromEntries(rows.map(({ v, s }) => [v.title, s.score]));
+  assert.ok(by['Менеджер по продажам B2B'] > 0.6, JSON.stringify(by));
+  assert.ok(by['Менеджер по продажам B2B'] > by['Менеджер по работе с клиентами']);
+  assert.ok(by['Менеджер по работе с клиентами'] > by['Python-разработчик']);
+  assert.ok(by['Python-разработчик'] < 0.35 && by['Водитель-экспедитор'] < 0.35, JSON.stringify(by));
+});
+
+test('должность в названии: «developer» = «разработчик»', () => {
+  const p = { ...profile, titleKeywords: [], position: 'Python разработчик' };
+  const a = scoreVacancy(vac({ title: 'Python Developer', snippet: 'Django' }), p, now.getTime());
+  assert.equal(a.parts.title, 1);
+});

@@ -1,417 +1,449 @@
-import * as store from './lib/store.js';
-import { scoreVacancy, profileSkills } from './lib/match.js';
-import { extractSkills, SKILL_NAMES, salaryInRub } from './lib/parse.js';
+// Главная solk / job: плитки-источники, центральная плитка с кнопкой поиска,
+// профиль, лучшее, воронка, отклики и панели, которые выезжают справа.
 
-const $ = (id) => document.getElementById(id);
+import * as store from './lib/store.js';
+import { DEFAULT_PROFILE, scoreAll, profileSkills } from './lib/match.js';
+import { $, h, logo, fmtTime, ago, daysSince, plural, download } from './ui/dom.js';
+import { createVacancyList } from './ui/vacancies.js';
+import { renderProfile } from './ui/profile.js';
+import { sourceRows, addSourceForm } from './ui/sources.js';
+
 const send = (msg) => chrome.runtime.sendMessage(msg);
+const PLATFORMS = ['avito', 'generic', 'telegram', 'hh'];
 const STATUS_LABEL = Object.fromEntries(store.STATUSES);
 const GRADE_LABEL = { intern: 'Стажёр', junior: 'Junior', middle: 'Middle', senior: 'Senior', lead: 'Lead' };
-const FORMAT_LABEL = { remote: 'Удалённо', hybrid: 'Гибрид', office: 'Офис' };
-const PAGE = 100;
 
-// Все данные со сторонних сайтов выводим только через textContent.
-function h(tag, attrs = {}, ...children) {
-  const el = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    if (v == null || v === false) continue;
-    if (k === 'class') el.className = v;
-    else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
-    else if (k === 'href') el.href = /^https?:\/\//i.test(v) ? v : '#';
-    else el.setAttribute(k, v === true ? '' : v);
+const state = {
+  all: {}, profile: DEFAULT_PROFILE, settings: store.DEFAULT_SETTINGS, sources: [], resume: null,
+  scored: [], status: { running: false, progress: null },
+};
+
+// ---------------- Данные ----------------
+
+async function loadState() {
+  const all = await chrome.storage.local.get(null);
+  state.all = all;
+  state.profile = { ...DEFAULT_PROFILE, ...(all.profile || {}) };
+  state.settings = { ...store.DEFAULT_SETTINGS, ...(all.settings || {}) };
+  state.sources = all.sources || [];
+  state.resume = all.resume || null;
+  state.scored = scoreAll(store.vacanciesFrom(all), state.profile, state.resume?.text || '');
+}
+
+const isLive = (v) => !['hidden', 'rejected'].includes(v.status);
+const matching = (rows) => rows.filter(({ v, s }) => isLive(v) && s.score >= state.settings.matchScore);
+
+// ---------------- Главная ----------------
+
+function renderClock() {
+  const d = new Date();
+  $('clockTime').textContent = d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+  $('clockDate').textContent = d.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' });
+}
+
+function renderSourceTiles() {
+  const prog = state.status.progress;
+  const running = state.status.running;
+  for (const p of PLATFORMS) {
+    const tile = document.querySelector(`.t-${p}`);
+    const rows = state.scored.filter(({ v }) => v.platform === p);
+    const good = matching(rows);
+    const fresh = good.filter(({ v }) => v.status === 'new');
+    const srcs = state.sources.filter((s) => s.platform === p);
+    const states = srcs.map((s) => state.all[`srcstate:${s.id}`] || {});
+    const blocked = states.some((st) => st.lastStatus === 'blocked');
+    const last = states.map((st) => st.lastRunAt).filter(Boolean).sort().pop();
+    const scanning = running && prog?.current?.platform === p;
+    const queued = running && prog?.queue?.some((q) => q.platform === p);
+
+    tile.classList.toggle('scanning', scanning);
+    tile.classList.toggle('has-new', fresh.length > 0);
+    tile.querySelector('.count').textContent = rows.length || srcs.length ? good.length.toLocaleString('ru-RU') : '';
+    tile.title = `${store.PLATFORM_NAMES[p]}: подходящих ${good.length}, из них новых ${fresh.length}; всего найдено ${rows.length}`;
+
+    let sub;
+    if (scanning) sub = 'идёт поиск…';
+    else if (queued) sub = 'в очереди';
+    else if (!srcs.length) sub = p === 'hh' || p === 'avito' ? 'укажите должность в профиле' : '+ добавить источник';
+    else if (blocked) sub = '⚠ нужна проверка';
+    else if (!last) sub = `${srcs.length} ${plural(srcs.length, 'источник', 'источника', 'источников')} · ещё не искали`;
+    else sub = `${fresh.length} ${plural(fresh.length, 'новая', 'новых', 'новых')} · ${ago(last)}`;
+    tile.querySelector('.sub').textContent = sub;
+    tile.classList.toggle('warn', blocked && !scanning);
   }
-  for (const c of children.flat()) if (c != null && c !== false && c !== '') el.append(c instanceof Node ? c : String(c));
-  return el;
 }
 
-const splitList = (s) => (s || '').split(/[,\n;]+/).map((x) => x.trim()).filter(Boolean);
-const fmtDate = (iso) => (iso ? new Date(iso).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—');
-function ago(iso) {
-  if (!iso) return '';
-  const d = (Date.now() - Date.parse(iso)) / 86400e3;
-  if (d < 1 / 24) return 'только что';
-  if (d < 1) return `${Math.round(d * 24)} ч назад`;
-  return `${Math.round(d)} дн назад`;
+function renderMain() {
+  const p = state.profile;
+  $('whoName').textContent = p.name || 'Ваше имя';
+  $('whoName').classList.toggle('placeholder', !p.name);
+  $('whoPosition').textContent = p.position || 'укажите желаемую должность';
+  $('whoPosition').classList.toggle('placeholder', !p.position);
+
+  const { running, progress } = state.status;
+  const btn = $('findBtn');
+  btn.classList.toggle('busy', running);
+  if (running && progress?.total) {
+    const cur = progress.current;
+    $('findText').textContent = `Ищу: ${cur ? store.PLATFORM_NAMES[cur.platform] : '…'} · ${Math.min(progress.done + 1, progress.total)} из ${progress.total}`;
+    $('findFill').style.width = `${Math.round((progress.done / progress.total) * 100)}%`;
+  } else if (running) {
+    $('findText').textContent = 'Ищу…';
+    $('findFill').style.width = '0%';
+  } else {
+    $('findText').textContent = '/ Найти работу';
+    $('findFill').style.width = '0%';
+  }
 }
-function fmtSalary(s) {
-  if (!s) return '';
-  const cur = { RUB: '₽', USD: '$', EUR: '€', KZT: '₸' }[s.currency] || s.currency;
-  const n = (x) => x.toLocaleString('ru-RU');
-  if (s.from && s.to) return `${n(s.from)}–${n(s.to)} ${cur}`;
-  if (s.from) return `от ${n(s.from)} ${cur}`;
-  if (s.to) return `до ${n(s.to)} ${cur}`;
-  return '';
-}
 
-// ---------------- Навигация ----------------
-
-const views = ['vacancies', 'profile', 'sources', 'log'];
-function currentView() {
-  const v = location.hash.slice(1);
-  return views.includes(v) ? v : 'vacancies';
-}
-function showView() {
-  const v = currentView();
-  for (const name of views) $(`view-${name}`).hidden = name !== v;
-  document.querySelectorAll('.tabs a').forEach((a) => a.classList.toggle('active', a.dataset.view === v));
-  render[v]();
-}
-window.addEventListener('hashchange', showView);
-
-// ---------------- Вакансии ----------------
-
-const filters = { status: 'active', platform: '', minScore: 40, q: '', sort: 'score', limit: PAGE };
-let statusChip = null;
-
-async function renderVacancies() {
-  const [vs, profile] = await Promise.all([store.getVacancies(), store.getProfile()]);
-  const ps = profileSkills(profile);
-  const now = Date.now();
-  const scored = vs.map((v) => ({ v, s: scoreVacancy(v, profile, now, ps) }));
-
-  // Счётчики статусов по всем вакансиям, прошедшим порог оценки.
-  const counts = {};
-  for (const { v, s } of scored) if (s.score * 100 >= filters.minScore || v.status !== 'new') counts[v.status] = (counts[v.status] || 0) + 1;
-  const chips = $('statusChips');
-  chips.replaceChildren(...store.STATUSES.map(([key, label]) => h('button', {
-    class: `chip${statusChip === key ? ' active' : ''}`,
-    onclick: () => { statusChip = statusChip === key ? null : key; filters.limit = PAGE; renderVacancies(); },
-  }, `${label}: ${counts[key] || 0}`)));
-
-  const q = filters.q.toLowerCase();
-  let rows = scored.filter(({ v, s }) => {
-    if (statusChip) { if (v.status !== statusChip) return false; } else if (filters.status === 'active' && ['hidden', 'rejected'].includes(v.status)) return false;
-    if (filters.platform && v.platform !== filters.platform) return false;
-    // Порог оценки применяем только к ещё не разобранным вакансиям.
-    if (v.status === 'new' && s.score * 100 < filters.minScore) return false;
-    if (q && !`${v.title} ${v.company} ${v.description} ${v.snippet}`.toLowerCase().includes(q)) return false;
-    return true;
-  });
-  const dateOf = (v) => Date.parse(v.publishedAt || v.firstSeenAt) || 0;
-  rows.sort(filters.sort === 'date' ? (a, b) => dateOf(b.v) - dateOf(a.v) : (a, b) => b.s.score - a.s.score || dateOf(b.v) - dateOf(a.v));
-
-  const list = $('vacList');
-  if (!rows.length) {
-    list.replaceChildren(h('div', { class: 'empty' }, vs.length
-      ? 'Под фильтры ничего не подошло. Попробуйте снизить порог оценки.'
-      : 'Вакансий пока нет. Добавьте источники на вкладке «Источники» или соберите вакансии с открытой страницы через иконку расширения.'));
-    $('more').hidden = true;
+function renderProfileTile() {
+  const p = state.profile;
+  const el = $('profileTile');
+  const ps = profileSkills(p);
+  const empty = !p.position && !ps.length && !state.resume;
+  if (empty) {
+    el.replaceChildren(h('p', { class: 'cta' }, 'Начните здесь: должность, навыки и резюме — по ним подбираются вакансии.'));
     return;
   }
-  list.replaceChildren(...rows.slice(0, filters.limit).map(({ v, s }) => vacancyCard(v, s)));
-  $('more').hidden = rows.length <= filters.limit;
-  $('more').textContent = `Показать ещё (${rows.length - filters.limit})`;
+  const conds = [
+    p.grade ? GRADE_LABEL[p.grade] : null,
+    p.minSalary ? `от ${p.minSalary.toLocaleString('ru-RU')} ₽` : null,
+    (p.formats || []).length && p.formats.length < 3 ? p.formats.map((f) => ({ remote: 'удалённо', hybrid: 'гибрид', office: 'офис' }[f])).join(', ') : null,
+  ].filter(Boolean);
+  el.replaceChildren(...[
+    h('div', { class: 'resume-pill' }, state.resume ? `📄 ${state.resume.name}` : '📄 Загрузите резюме'),
+    conds.length ? h('p', { class: 'conds' }, conds.join(' · ')) : null,
+    h('div', { class: 'tile-chips' }, [...ps].sort((a, b) => b.primary - a.primary).slice(0, 12).map((s) => h('span', { class: s.primary ? 'primary' : '' }, s.name))),
+  ].filter(Boolean));
 }
 
-function vacancyCard(v, s) {
-  const pct = Math.round(s.score * 100);
-  const setStatus = async (status) => { await store.setUserFields(v.key, { status }); };
-  const statusSel = h('select', { title: 'Статус', onchange: (e) => setStatus(e.target.value) },
-    store.STATUSES.map(([k, label]) => h('option', { value: k, selected: k === v.status }, label)));
-
-  const noteBox = h('div', { class: 'note', hidden: !v.note },
-    h('textarea', {
-      placeholder: 'Заметка: кому писал, контакты, дата интервью…',
-      onchange: (e) => store.setUserFields(v.key, { note: e.target.value }),
-    }, v.note));
-
-  const salary = fmtSalary(v.salary);
-  const meta = h('div', { class: 'meta' },
-    v.company && h('span', {}, v.company),
-    v.location && h('span', {}, v.location),
-    salary && h('span', { class: 'salary' }, salary),
-    v.grades?.length ? h('span', {}, v.grades.map((g) => GRADE_LABEL[g]).join('/')) : null,
-    v.formats?.length ? h('span', {}, v.formats.map((f) => FORMAT_LABEL[f]).join(', ')) : null,
-    h('span', {}, `${store.PLATFORM_NAMES[v.platform]} · ${(v.sources || []).join(', ')}`),
-    v.alsoAt?.length ? h('span', {}, `ещё в ${v.alsoAt.length} ист.`) : null,
-    h('span', {}, ago(v.publishedAt || v.firstSeenAt)));
-
-  const skillChips = h('div', { class: 'chips' },
-    s.matched.map((k) => h('span', { class: 'chip ok', title: 'Есть у вас' }, SKILL_NAMES[k] || k.replace(/^custom:/, ''))),
-    s.missing.slice(0, 8).map((k) => h('span', { class: 'chip miss', title: 'Нет в профиле' }, SKILL_NAMES[k] || k.replace(/^custom:/, ''))),
-    s.stopped && h('span', { class: 'chip' }, `стоп-слово: ${s.stopped}`));
-
-  const open = () => { if (v.status === 'new') setStatus('viewed'); };
-
-  return h('article', { class: `card st-${v.status}` },
-    h('div', { class: `score ${pct >= 65 ? 'hi' : pct >= 45 ? 'mid' : ''}`, title: scoreTitle(s) }, `${pct}`),
-    h('div', {},
-      h('h3', {}, v.status === 'new' && h('span', { class: 'new-dot', title: 'Не смотрел' }),
-        h('a', { href: v.url, target: '_blank', rel: 'noopener', onclick: open, onauxclick: open }, v.title)),
-      meta,
-      v.snippet || v.description ? h('p', { class: 'snippet' }, (v.snippet || v.description).slice(0, 400)) : null,
-      skillChips,
-      v.alsoAt?.length ? h('div', { class: 'meta small' }, 'Также: ', v.alsoAt.map((a) => h('a', { href: a.url, target: '_blank', rel: 'noopener' }, a.source || a.platform))) : null),
-    h('div', { class: 'side' },
-      statusSel,
-      h('button', { class: 'link', onclick: () => { noteBox.hidden = !noteBox.hidden; } }, v.note ? 'Заметка ✎' : 'Заметка'),
-      v.status !== 'hidden' && h('button', { class: 'link', onclick: () => setStatus('hidden') }, 'Скрыть')),
-    noteBox);
+function openVacancy(e, v) {
+  e.stopPropagation();
+  if (v.status === 'new') store.setUserFields(v.key, { status: 'viewed' });
 }
 
-function scoreTitle(s) {
-  if (!s.parts) return '';
-  const p = s.parts;
-  const pc = (x) => `${Math.round(x * 100)}%`;
-  return `Навыки ${pc(p.skills)} · Название ${pc(p.title)} · Грейд ${pc(p.grade)} · Зарплата ${pc(p.salary)} · Свежесть ${pc(p.fresh)}`;
+function renderTopTile() {
+  const rows = matching(state.scored).filter(({ v }) => ['new', 'viewed'].includes(v.status)).sort((a, b) => b.s.score - a.s.score).slice(0, 4);
+  $('topTile').replaceChildren(rows.length
+    ? h('ol', { class: 'mini-list' }, rows.map(({ v, s }) => h('li', {},
+      h('span', { class: 'mini-score' }, Math.round(s.score * 100)),
+      h('a', { href: v.url, target: '_blank', rel: 'noopener', onclick: (e) => openVacancy(e, v) },
+        h('span', { class: 'mini-title' }, v.title),
+        h('span', { class: 'mini-sub' }, [v.company, store.PLATFORM_NAMES[v.platform]].filter(Boolean).join(' · '))))))
+    : h('p', { class: 'cta' }, state.scored.length ? 'Новых подходящих нет — загляните позже или ослабьте условия в профиле.' : 'Нажмите «/ Найти работу» — здесь появятся лучшие совпадения.'));
 }
 
-let qTimer;
-$('q').addEventListener('input', (e) => { clearTimeout(qTimer); qTimer = setTimeout(() => { filters.q = e.target.value; filters.limit = PAGE; renderVacancies(); }, 200); });
-$('fStatus').addEventListener('change', (e) => { filters.status = e.target.value; statusChip = null; renderVacancies(); });
-$('fPlatform').addEventListener('change', (e) => { filters.platform = e.target.value; renderVacancies(); });
-$('fSort').addEventListener('change', (e) => { filters.sort = e.target.value; renderVacancies(); });
-$('fScore').addEventListener('input', (e) => { filters.minScore = Number(e.target.value); $('fScoreVal').textContent = `${e.target.value}%`; renderVacancies(); });
-$('more').addEventListener('click', () => { filters.limit += PAGE; renderVacancies(); });
-
-// ---------------- Профиль ----------------
-
-async function renderProfile() {
-  const p = await store.getProfile();
-  $('pKeywords').value = (p.titleKeywords || []).join(', ');
-  $('pGrade').value = p.grade || '';
-  $('pSkills').value = (p.skills || []).join(', ');
-  $('pSalary').value = p.minSalary || '';
-  document.querySelectorAll('input[name="fmt"]').forEach((c) => { c.checked = (p.formats || []).includes(c.value); });
-  $('pCities').value = (p.cities || []).join(', ');
-  $('pStop').value = (p.stopWords || []).join(', ');
-  $('pAge').value = p.maxAgeDays || 30;
-  const { resumeText } = await chrome.storage.local.get('resumeText');
-  $('resume').value = resumeText || '';
+function renderFunnelTile() {
+  const c = {};
+  for (const { v } of state.scored) c[v.status] = (c[v.status] || 0) + 1;
+  const newGood = matching(state.scored).filter(({ v }) => v.status === 'new').length;
+  const rows = [['Новые подходящие', newGood], ['Просмотрел', c.viewed || 0], ['Отправил резюме', c.applied || 0], ['Интервью', c.interview || 0], ['Оффер', c.offer || 0], ['Отказ', c.rejected || 0]];
+  $('funnelTile').replaceChildren(h('ul', { class: 'funnel' }, rows.map(([label, n]) => h('li', {}, h('b', {}, n), h('span', {}, label)))));
 }
 
-$('profileForm').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  await store.saveProfile({
-    titleKeywords: splitList($('pKeywords').value),
-    grade: $('pGrade').value,
-    skills: splitList($('pSkills').value),
-    minSalary: Number($('pSalary').value) || 0,
-    formats: [...document.querySelectorAll('input[name="fmt"]:checked')].map((c) => c.value),
-    cities: splitList($('pCities').value),
-    stopWords: splitList($('pStop').value),
-    maxAgeDays: Number($('pAge').value) || 30,
-  });
-  $('profileSaved').textContent = 'Сохранено. Оценки пересчитаны.';
-  setTimeout(() => { $('profileSaved').textContent = ''; }, 3000);
-});
+function renderSearchTile() {
+  const runs = state.all.runs || [];
+  const last = runs[0];
+  const srcStates = state.sources.map((s) => state.all[`srcstate:${s.id}`] || {});
+  const problems = srcStates.filter((st) => st.lastStatus === 'blocked' || st.lastStatus === 'failed').length;
+  const next = srcStates.map((st) => st.nextRunAt).filter(Boolean).sort()[0];
+  const total = state.scored.length;
+  const good = matching(state.scored).length;
+  const auto = state.settings.autoRun;
+  $('searchTile').replaceChildren(h('dl', { class: 'facts' },
+    h('dt', {}, 'Последний поиск'), h('dd', {}, last ? fmtTime(last.at) : 'ещё не было'),
+    h('dt', {}, 'Подходящих'), h('dd', {}, `${good} из ${total}`),
+    h('dt', {}, 'Источников'), h('dd', {}, `${state.sources.filter((s) => s.enabled).length}${problems ? ` · ⚠ ${problems} с проблемой` : ''}`),
+    h('dt', {}, 'Авто-поиск'), h('dd', {}, auto ? (next ? `следующий ${fmtTime(next)}` : 'включён') : 'выключен')));
+}
 
-$('findSkills').addEventListener('click', async () => {
-  const text = $('resume').value;
-  await chrome.storage.local.set({ resumeText: text });
-  const { required, optional } = extractSkills(text);
-  const have = new Set(profileSkills({ skills: splitList($('pSkills').value) }).map((s) => s.slug));
-  const found = [...new Set([...required, ...optional])].filter((s) => !have.has(s));
-  const box = $('foundSkills');
-  if (!found.length) { box.replaceChildren(h('span', { class: 'muted' }, 'Новых навыков не найдено — всё уже в профиле.')); return; }
-  box.replaceChildren(h('span', { class: 'muted small' }, 'Нажмите, чтобы добавить в профиль, затем «Сохранить профиль»:'),
-    ...found.map((slug) => h('button', {
-      class: 'chip',
-      type: 'button',
-      onclick: (e) => {
-        const cur = splitList($('pSkills').value);
-        $('pSkills').value = [...cur, SKILL_NAMES[slug]].join(', ');
-        e.target.remove();
-      },
-    }, `+ ${SKILL_NAMES[slug]}`)));
-});
+function renderAppliedTile() {
+  const rows = state.scored.filter(({ v }) => ['applied', 'interview', 'offer'].includes(v.status))
+    .sort((a, b) => Date.parse(b.v.statusChangedAt || 0) - Date.parse(a.v.statusChangedAt || 0)).slice(0, 3);
+  $('appliedTile').replaceChildren(rows.length
+    ? h('ul', { class: 'mini-list plain' }, rows.map(({ v }) => {
+      const d = daysSince(v.statusChangedAt);
+      const note = v.status === 'applied' ? (d >= 7 ? `ждёт ответа ${d} дн — напомните о себе` : `ждёт ответа ${d ?? 0} дн`) : STATUS_LABEL[v.status];
+      return h('li', {}, h('a', { href: v.url, target: '_blank', rel: 'noopener', onclick: (e) => e.stopPropagation() },
+        h('span', { class: 'mini-title' }, v.title),
+        h('span', { class: `mini-sub ${v.status === 'applied' && d >= 7 ? 'late' : ''}` }, [v.company, note].filter(Boolean).join(' · '))));
+    }))
+    : h('p', { class: 'cta' }, 'Отметьте «Отправил резюме» у вакансии — она появится здесь, и вы не забудете про ответ.'));
+}
 
-// ---------------- Источники ----------------
+function renderHome() {
+  renderSourceTiles();
+  renderMain();
+  renderProfileTile();
+  renderTopTile();
+  renderFunnelTile();
+  renderSearchTile();
+  renderAppliedTile();
+}
 
-const INTERVALS = [30, 60, 120, 240, 360, 720, 1440];
-const intervalLabel = (m) => (m < 60 ? `${m} мин` : m < 1440 ? `${m / 60} ч` : 'раз в сутки');
+// ---------------- Панели ----------------
 
-async function renderSources() {
-  const sources = await store.getSources();
-  const all = await store.getAll();
-  const body = $('srcBody');
-  if (!sources.length) {
-    body.replaceChildren(h('tr', {}, h('td', { colspan: 6, class: 'empty' }, 'Источников пока нет.')));
-    return;
-  }
-  const update = async (id, patch) => {
-    const list = await store.getSources();
-    await store.saveSources(list.map((s) => (s.id === id ? { ...s, ...patch } : s)));
+const DRAWERS = {
+  hh: { title: 'hh.ru', platform: 'hh' },
+  avito: { title: 'Avito', platform: 'avito' },
+  telegram: { title: 'Telegram', platform: 'telegram' },
+  generic: { title: 'Сайты компаний', platform: 'generic' },
+  profile: { title: 'Профиль и резюме' },
+  all: { title: 'Все подходящие вакансии' },
+  funnel: { title: 'Воронка' },
+  applied: { title: 'Мои отклики' },
+  search: { title: 'Поиск и настройки' },
+};
+
+let drawer = null; // { kind, list, refresh, guard }
+
+function openDrawer(kind) {
+  const def = DRAWERS[kind];
+  if (!def) return closeDrawer();
+  const body = $('drawerBody');
+  $('drawer').className = `drawer open dk-${kind}`;
+  $('drawer').setAttribute('aria-hidden', 'false');
+  $('scrim').hidden = false;
+  document.body.classList.add('drawer-open');
+  $('drawerTitle').replaceChildren(...[def.platform ? logo(def.platform, 'small') : null, h('span', {}, def.title)].filter(Boolean));
+  body.scrollTop = 0;
+
+  drawer = { kind };
+  if (def.platform) buildPlatformDrawer(body, def.platform);
+  else if (kind === 'profile') buildProfileDrawer(body);
+  else if (kind === 'all') buildListDrawer(body, { showPlatform: true });
+  else if (kind === 'funnel') buildListDrawer(body, { showStatusTabs: true, showPlatform: true });
+  else if (kind === 'applied') buildListDrawer(body, { statuses: ['applied', 'interview', 'offer'], showPlatform: true });
+  else if (kind === 'search') buildSearchDrawer(body);
+}
+
+function closeDrawer() {
+  $('drawer').className = 'drawer';
+  $('drawer').setAttribute('aria-hidden', 'true');
+  $('scrim').hidden = true;
+  document.body.classList.remove('drawer-open');
+  drawer = null;
+}
+
+function buildListDrawer(body, opts) {
+  const list = createVacancyList({ ...opts, matchScore: state.settings.matchScore });
+  body.replaceChildren(list.el);
+  list.update(state.scored);
+  drawer.refresh = () => list.update(state.scored);
+}
+
+function buildPlatformDrawer(body, platform) {
+  const list = createVacancyList({ platform, matchScore: state.settings.matchScore });
+  const stats = h('div', { class: 'stats' });
+  const srcBox = h('div', {});
+  const autoNote = (platform === 'hh' || platform === 'avito')
+    ? h('p', { class: 'muted small' }, state.profile.position
+      ? `Поиск по должности «${state.profile.position}» добавлен автоматически. Свой поиск с фильтрами точнее: настройте его на сайте и вставьте ссылку ниже.`
+      : 'Укажите желаемую должность в профиле — поиск на этой площадке настроится сам. Или вставьте ссылку на свой поиск ниже.')
+    : null;
+  body.replaceChildren(
+    stats,
+    h('section', { class: 'dsec' }, h('h3', {}, 'Подходящие вакансии'), list.el),
+    h('section', { class: 'dsec' }, h('h3', {}, 'Источники'), autoNote, srcBox, addSourceForm(platform)));
+
+  drawer.refresh = () => {
+    const rows = state.scored.filter(({ v }) => v.platform === platform);
+    const good = matching(rows);
+    stats.replaceChildren(
+      stat(good.length, 'подходят вам'),
+      stat(good.filter(({ v }) => v.status === 'new').length, 'новых'),
+      stat(rows.length, 'всего найдено'),
+      stat(rows.filter(({ v }) => ['applied', 'interview', 'offer'].includes(v.status)).length, 'откликов'));
+    list.update(rows);
+    if (!srcBox.contains(document.activeElement)) srcBox.replaceChildren(sourceRows(state.sources.filter((s) => s.platform === platform), state.all));
   };
-  body.replaceChildren(...sources.map((s) => {
-    const st = all[`srcstate:${s.id}`] || {};
-    return h('tr', {},
-      h('td', {}, h('input', { type: 'checkbox', checked: s.enabled, title: 'Включён', onchange: (e) => update(s.id, { enabled: e.target.checked }) })),
-      h('td', { class: 'url' },
-        h('div', {}, h('strong', {}, s.name)),
-        h('div', { class: 'small muted' }, `${store.PLATFORM_NAMES[s.platform]} · `, h('a', { href: s.url, target: '_blank', rel: 'noopener' }, s.url))),
-      h('td', {}, h('select', { onchange: (e) => update(s.id, { intervalMin: Number(e.target.value) }) },
-        INTERVALS.map((m) => h('option', { value: m, selected: m === s.intervalMin }, intervalLabel(m))))),
-      h('td', {},
-        st.lastRunAt ? h('div', {}, fmtDate(st.lastRunAt)) : h('span', { class: 'muted' }, 'ещё не было'),
-        st.lastStatus && h('div', { class: `small status-${st.lastStatus}` },
-          { ok: 'ok', empty: 'пусто', failed: 'ошибка', blocked: 'проверка/капча' }[st.lastStatus],
-          st.lastStatus !== 'failed' && st.lastStatus !== 'blocked' ? ` · найдено ${st.lastFound}, новых ${st.lastAdded}` : ''),
-        st.lastError && h('div', { class: 'small muted' }, st.lastError)),
-      h('td', {}, st.nextRunAt ? fmtDate(st.nextRunAt) : 'скоро'),
-      h('td', {}, h('div', { class: 'row' },
-        h('button', { onclick: async () => { const r = await send({ type: 'runNow', sourceId: s.id }); flashRun(r); } }, 'Обойти'),
-        h('button', { class: 'link', onclick: async () => {
-          if (!confirm(`Удалить источник «${s.name}»? Собранные вакансии останутся.`)) return;
-          await store.saveSources((await store.getSources()).filter((x) => x.id !== s.id));
-          await chrome.storage.local.remove(`srcstate:${s.id}`);
-        } }, 'Удалить'))));
-  }));
+  drawer.refresh();
 }
 
-async function addSourceFromForm({ url, name, cfg }) {
-  const platform = store.detectPlatformByUrl(url);
-  // Доступ к сайту компании запрашиваем сразу, пока действует клик пользователя.
-  if (platform === 'generic') {
-    let origin;
-    try { origin = `${new URL(url).origin}/*`; } catch { return 'Это не похоже на ссылку.'; }
-    const ok = await chrome.permissions.request({ origins: [origin] });
-    if (!ok) return 'Без доступа к сайту расширение не сможет его обходить.';
-  }
-  const sources = await store.getSources();
-  const src = store.makeSource(url, { name: name || undefined, cfg });
-  if (sources.some((s) => s.url === src.url)) return 'Такой источник уже есть.';
-  await store.saveSources([...sources, src]);
-  return `Добавлено: ${src.name}`;
+const stat = (n, label) => h('div', { class: 'stat' }, h('b', {}, n.toLocaleString('ru-RU')), h('span', {}, label));
+
+async function buildProfileDrawer(body) {
+  drawer.refresh = null; // форму не перерисовываем на лету
+  await renderProfile(body, { onSaved: () => toast('Профиль сохранён') });
 }
 
-$('addForm').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const cfg = {};
-  if ($('aLink').value.trim()) cfg.linkPattern = $('aLink').value.trim();
-  if ($('aItem').value.trim()) cfg.itemSelector = $('aItem').value.trim();
-  if ($('aTitle').value.trim()) cfg.titleSelector = $('aTitle').value.trim();
-  if (cfg.linkPattern) { try { new RegExp(cfg.linkPattern); } catch { $('addMsg').textContent = 'Шаблон ссылки — некорректное регулярное выражение.'; return; } }
-  $('addMsg').textContent = await addSourceFromForm({ url: $('aUrl').value.trim(), name: $('aName').value.trim(), cfg });
-  e.target.reset();
-});
+function buildSearchDrawer(body) {
+  const s = state.settings;
+  const auto = h('input', { type: 'checkbox', checked: s.autoRun });
+  const locked = h('input', { type: 'checkbox', checked: s.skipWhenLocked });
+  const openIn = h('select', {}, h('option', { value: 'tab', selected: s.openIn === 'tab' }, 'в фоновой вкладке'), h('option', { value: 'window', selected: s.openIn === 'window' }, 'в свёрнутом окне'));
+  const match = h('input', { type: 'number', min: 10, max: 95, step: 5, value: Math.round(s.matchScore * 100) });
+  const notify = h('input', { type: 'number', min: 0, max: 100, step: 5, value: Math.round(s.notifyScore * 100) });
+  const retention = h('input', { type: 'number', min: 7, max: 365, value: s.retentionDays });
+  const saved = h('span', { class: 'muted small' });
 
-$('quickHH').addEventListener('click', async () => {
-  const q = $('quickQ').value.trim();
-  if (!q) return;
-  const url = `https://hh.ru/search/vacancy?text=${encodeURIComponent(q)}&order_by=publication_time&search_period=30&items_on_page=50`;
-  $('addMsg').textContent = await addSourceFromForm({ url, name: `hh: ${q}` });
-});
-$('quickAvito').addEventListener('click', async () => {
-  const q = $('quickQ').value.trim();
-  if (!q) return;
-  const url = `https://www.avito.ru/all/vakansii?q=${encodeURIComponent(q)}&s=104`;
-  $('addMsg').textContent = await addSourceFromForm({ url, name: `Avito: ${q}` });
-});
+  const settingsForm = h('form', { class: 'settings', onsubmit: async (e) => {
+    e.preventDefault();
+    await store.saveSettings({
+      ...(await store.getSettings()),
+      autoRun: auto.checked,
+      skipWhenLocked: locked.checked,
+      openIn: openIn.value,
+      matchScore: Math.min(0.95, Math.max(0.1, (Number(match.value) || 50) / 100)),
+      notifyScore: (Number(notify.value) || 0) / 100,
+      retentionDays: Number(retention.value) || 45,
+    });
+    saved.textContent = 'Сохранено';
+    setTimeout(() => { saved.textContent = ''; }, 2500);
+  } },
+  h('label', { class: 'check' }, auto, 'Искать автоматически, пока открыт браузер'),
+  h('label', { class: 'check' }, locked, 'Не искать, когда экран заблокирован'),
+  h('div', { class: 'grid3' },
+    h('div', { class: 'field' }, h('span', { class: 'field-label' }, 'Открывать сайты'), openIn),
+    h('div', { class: 'field' }, h('span', { class: 'field-label' }, 'Вакансия «подходит» с оценки, %'), match),
+    h('div', { class: 'field' }, h('span', { class: 'field-label' }, 'Уведомлять с оценки, %'), notify),
+    h('div', { class: 'field' }, h('span', { class: 'field-label' }, 'Хранить нетронутые, дней'), retention)),
+  h('div', { class: 'savebar' }, h('button', { class: 'btn primary', type: 'submit' }, 'Сохранить'), saved));
 
-// ---------------- Журнал и настройки ----------------
+  const srcBox = h('div', {});
+  const logBody = h('tbody', {});
+  const importFile = h('input', { type: 'file', accept: 'application/json', hidden: true, onchange: async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    try {
+      const data = JSON.parse(await file.text());
+      if (confirm(`Восстановить ${Object.keys(data).length} записей из копии? Совпадающие данные будут заменены.`)) {
+        await chrome.storage.local.set(data);
+        toast('Данные восстановлены');
+      }
+    } catch (err) { alert(`Не получилось прочитать файл: ${err.message}`); }
+  } });
 
-async function renderLog() {
-  await renderSettings();
-  await renderRuns();
+  body.replaceChildren(
+    h('section', { class: 'dsec' }, h('h3', {}, 'Как искать'), settingsForm),
+    h('section', { class: 'dsec' }, h('h3', {}, 'Все источники'), srcBox),
+    h('section', { class: 'dsec' }, h('h3', {}, 'Данные'),
+      h('p', { class: 'muted small' }, 'Всё хранится только в этом браузере. Сделайте резервную копию, если переустанавливаете расширение.'),
+      h('div', { class: 'row' },
+        h('button', { class: 'btn', type: 'button', onclick: exportCsv }, 'Скачать вакансии (Excel/CSV)'),
+        h('button', { class: 'btn', type: 'button', onclick: async () => download(`solk-job-backup-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(await chrome.storage.local.get(null)), 'application/json') }, 'Резервная копия'),
+        h('button', { class: 'btn', type: 'button', onclick: () => importFile.click() }, 'Восстановить из копии'),
+        importFile)),
+    h('section', { class: 'dsec' }, h('h3', {}, 'Журнал поиска'),
+      h('table', { class: 'log' }, h('thead', {}, h('tr', {}, ['Когда', 'Источник', 'Итог', 'Найдено', 'Новых', 'Комментарий'].map((t) => h('th', {}, t)))), logBody)));
+
+  drawer.refresh = () => {
+    if (!srcBox.contains(document.activeElement)) srcBox.replaceChildren(sourceRows(state.sources, state.all));
+    const runs = (state.all.runs || []).slice(0, 60);
+    logBody.replaceChildren(...(runs.length ? runs.map((r) => h('tr', {},
+      h('td', {}, fmtTime(r.at)), h('td', {}, r.source), h('td', { class: `st-${r.status}` }, { ok: 'ok', empty: 'пусто', failed: 'ошибка', blocked: 'проверка' }[r.status] || r.status),
+      h('td', {}, r.found ?? ''), h('td', {}, r.added ?? ''), h('td', { class: 'muted' }, r.error || '')))
+      : [h('tr', {}, h('td', { colspan: 6, class: 'empty' }, 'Поиска ещё не было.'))]));
+  };
+  drawer.refresh();
 }
 
-async function renderSettings() {
-  const s = await store.getSettings();
-  $('sAuto').checked = s.autoRun;
-  $('sTick').value = s.tickMinutes;
-  $('sLocked').checked = s.skipWhenLocked;
-  $('sOpen').value = s.openIn;
-  $('sNotify').value = Math.round(s.notifyScore * 100);
-  $('sManual').value = s.manualEnrichMax;
-  $('sRetention').value = s.retentionDays;
-}
-
-async function renderRuns() {
-  const { runs } = await chrome.storage.local.get('runs');
-  const body = $('logBody');
-  if (!runs?.length) { body.replaceChildren(h('tr', {}, h('td', { colspan: 6, class: 'empty' }, 'Обходов ещё не было.'))); return; }
-  body.replaceChildren(...runs.slice(0, 100).map((r) => h('tr', {},
-    h('td', {}, fmtDate(r.at)),
-    h('td', {}, r.source),
-    h('td', { class: `status-${r.status}` }, r.status),
-    h('td', {}, r.found ?? ''),
-    h('td', {}, r.added ?? ''),
-    h('td', { class: 'small muted' }, r.error || ''))));
-}
-
-$('settingsForm').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  await store.saveSettings({
-    ...(await store.getSettings()),
-    autoRun: $('sAuto').checked,
-    tickMinutes: Math.max(1, Number($('sTick').value) || 5),
-    skipWhenLocked: $('sLocked').checked,
-    openIn: $('sOpen').value,
-    notifyScore: (Number($('sNotify').value) || 0) / 100,
-    manualEnrichMax: Number($('sManual').value) || 0,
-    retentionDays: Number($('sRetention').value) || 45,
-  });
-  $('settingsSaved').textContent = 'Сохранено.';
-  setTimeout(() => { $('settingsSaved').textContent = ''; }, 3000);
-});
-
-function download(name, text, type) {
-  const url = URL.createObjectURL(new Blob([text], { type }));
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = name;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-
-$('exportCsv').addEventListener('click', async () => {
-  const [vs, profile] = await Promise.all([store.getVacancies(), store.getProfile()]);
-  const ps = profileSkills(profile);
-  const cols = ['score', 'status', 'title', 'company', 'salary_rub_from', 'salary_rub_to', 'grades', 'formats', 'location', 'platform', 'url', 'published', 'note'];
+function exportCsv() {
+  const cols = ['Оценка', 'Статус', 'Должность', 'Компания', 'Зарплата от', 'Зарплата до', 'Валюта', 'Город', 'Источник', 'Ссылка', 'Дата', 'Заметка'];
   const esc = (x) => `"${String(x ?? '').replace(/"/g, '""')}"`;
-  const lines = vs.map((v) => {
-    const rub = salaryInRub(v.salary) || {};
-    return [Math.round(scoreVacancy(v, profile, Date.now(), ps).score * 100), STATUS_LABEL[v.status], v.title, v.company, rub.from, rub.to,
-      (v.grades || []).join('/'), (v.formats || []).join('/'), v.location, v.platform, v.url, v.publishedAt || v.firstSeenAt, v.note].map(esc).join(';');
-  });
-  download(`job-radar-${new Date().toISOString().slice(0, 10)}.csv`, `﻿${cols.join(';')}\n${lines.join('\n')}`, 'text/csv');
-});
+  const lines = [...state.scored].sort((a, b) => b.s.score - a.s.score).map(({ v, s }) => [
+    Math.round(s.score * 100), STATUS_LABEL[v.status], v.title, v.company, v.salary?.from, v.salary?.to, v.salary?.currency,
+    v.location, store.PLATFORM_NAMES[v.platform], v.url, (v.publishedAt || v.firstSeenAt || '').slice(0, 10), v.note,
+  ].map(esc).join(';'));
+  download(`solk-job-${new Date().toISOString().slice(0, 10)}.csv`, `﻿${cols.join(';')}\n${lines.join('\n')}`, 'text/csv');
+}
 
-$('exportJson').addEventListener('click', async () => {
-  download(`job-radar-backup-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(await store.getAll()), 'application/json');
-});
-$('importBtn').addEventListener('click', () => $('importFile').click());
-$('importFile').addEventListener('change', async (e) => {
-  const file = e.target.files[0];
-  if (!file) return;
-  try {
-    const data = JSON.parse(await file.text());
-    if (!confirm(`Восстановить ${Object.keys(data).length} записей? Текущие данные с теми же ключами будут заменены.`)) return;
-    await chrome.storage.local.set(data);
-    alert('Готово.');
-  } catch (err) {
-    alert(`Не получилось прочитать файл: ${err.message}`);
+// ---------------- Поиск ----------------
+
+let toastTimer;
+function toast(text) {
+  let el = document.querySelector('.toast');
+  if (!el) { el = h('div', { class: 'toast', role: 'status' }); document.body.append(el); }
+  el.textContent = text;
+  el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), 4500);
+}
+
+async function findWork() {
+  const p = state.profile;
+  if (!p.position && !(p.skills || []).length) {
+    location.hash = 'profile';
+    toast('Сначала укажите желаемую должность или навыки — по ним идёт поиск');
+    return;
   }
-});
-
-// ---------------- Общее ----------------
-
-function flashRun(r) {
-  $('runState').textContent = r?.busy ? `обход уже идёт: ${r.current || ''}` : 'обход запущен…';
+  await store.syncAutoSources(p);
+  const sources = (await store.getSources()).filter((s) => s.enabled);
+  if (!sources.length) {
+    location.hash = 'telegram';
+    toast('Нет включённых источников — добавьте хотя бы один');
+    return;
+  }
+  const r = await send({ type: 'runNow' });
+  if (r?.busy) toast('Поиск уже идёт');
+  else if (r && !r.started) toast('Все источники проверены меньше 10 минут назад — свежие результаты уже на плитках');
+  else toast(`Ищу в ${r.total} ${plural(r.total, 'источнике', 'источниках', 'источниках')}. Вкладки будут открываться в фоне и закрываться сами.`);
+  pollStatus();
 }
-$('runAll').addEventListener('click', async () => flashRun(await send({ type: 'runNow' })));
 
-async function pollState() {
-  const s = await send({ type: 'status' }).catch(() => null);
-  $('runState').textContent = s?.running ? `идёт обход: ${s.current || '…'}` : '';
+let pollTimer;
+async function pollStatus() {
+  clearTimeout(pollTimer);
+  const st = await send({ type: 'status' }).catch(() => null);
+  if (st) {
+    const wasRunning = state.status.running;
+    state.status = st;
+    renderMain();
+    renderSourceTiles();
+    if (wasRunning && !st.running) {
+      const runs = (state.all.runs || []).slice(0, st.progress?.total || 0);
+      const added = runs.reduce((n, r) => n + (r.added || 0), 0);
+      toast(`Поиск завершён: новых вакансий ${added}, подходящих сейчас ${matching(state.scored).length}`);
+    }
+  }
+  pollTimer = setTimeout(pollStatus, state.status.running ? 1000 : 5000);
 }
-setInterval(pollState, 3000);
 
-const render = { vacancies: renderVacancies, profile: renderProfile, sources: renderSources, log: renderLog };
+// ---------------- Связка ----------------
 
-// Живое обновление при изменениях из фона. Формы профиля и настроек не
-// перерисовываем, чтобы не сбросить то, что вы вводите. Пока открыта заметка,
-// ленту тоже не трогаем.
-const live = { vacancies: renderVacancies, sources: renderSources, log: renderRuns };
-let changeTimer;
-chrome.storage.onChanged.addListener((_changes, area) => {
-  if (area !== 'local') return;
-  const v = currentView();
-  if (!live[v]) return;
-  if (v === 'vacancies' && document.activeElement?.tagName === 'TEXTAREA') return;
-  clearTimeout(changeTimer);
-  changeTimer = setTimeout(() => live[v](), 400);
-});
+function route() {
+  const kind = decodeURIComponent(location.hash.slice(1));
+  if (kind && DRAWERS[kind]) openDrawer(kind);
+  else closeDrawer();
+}
 
-showView();
-pollState();
+let refreshTimer;
+let lastRefresh = 0;
+function scheduleRefresh() {
+  clearTimeout(refreshTimer);
+  // Во время поиска данные пишутся часто — не чаще раза в секунду.
+  const wait = Math.max(150, 1000 - (Date.now() - lastRefresh));
+  refreshTimer = setTimeout(async () => {
+    lastRefresh = Date.now();
+    await loadState();
+    renderHome();
+    drawer?.refresh?.();
+  }, wait);
+}
+
+function bind() {
+  document.querySelectorAll('[data-logo]').forEach((el) => el.replaceChildren(logo(el.dataset.logo)));
+  document.querySelectorAll('[data-open]').forEach((el) => {
+    const go = (e) => {
+      if (e.target.closest('a')) return; // ссылки внутри плиток работают сами
+      location.hash = el.dataset.open;
+    };
+    el.addEventListener('click', go);
+    el.addEventListener('keydown', (e) => { if (e.key === 'Enter' && e.target === el) go(e); });
+  });
+  $('who').addEventListener('click', (e) => { e.stopPropagation(); location.hash = 'profile'; });
+  $('findBtn').addEventListener('click', (e) => { e.stopPropagation(); findWork(); });
+  $('scrim').addEventListener('click', () => { location.hash = ''; });
+  document.querySelector('.drawer-close').addEventListener('click', (e) => { e.preventDefault(); location.hash = ''; });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && drawer) location.hash = ''; });
+  window.addEventListener('hashchange', route);
+  chrome.storage.onChanged.addListener((_c, area) => { if (area === 'local') scheduleRefresh(); });
+}
+
+bind();
+renderClock();
+setInterval(renderClock, 5000);
+await loadState();
+renderHome();
+route();
+pollStatus();

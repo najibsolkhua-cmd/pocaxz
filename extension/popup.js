@@ -17,7 +17,7 @@ async function activeTab() {
 
 async function refreshState() {
   const s = await send({ type: 'status' });
-  $('state').textContent = s?.running ? `идёт обход: ${s.current || '…'}` : '';
+  $('state').textContent = s?.running ? `ищу: ${s.current || '…'}` : '';
 }
 
 $('collect').addEventListener('click', async () => {
@@ -52,7 +52,9 @@ $('addSource').addEventListener('click', async () => {
 
 $('runAll').addEventListener('click', async () => {
   const r = await send({ type: 'runNow' });
-  show(r?.busy ? 'Обход уже идёт.' : 'Обход запущен. Вкладки будут открываться в фоне и закрываться сами.', 'ok');
+  if (r?.busy) show('Поиск уже идёт.');
+  else if (r && !r.started) show('Все источники проверялись меньше 10 минут назад или ещё не добавлены. Откройте главную.');
+  else show(`Ищу в ${r.total} источн. Вкладки будут открываться в фоне и закрываться сами.`, 'ok');
   refreshState();
 });
 

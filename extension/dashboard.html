@@ -3,197 +3,91 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Job Radar — CRM</title>
+  <title>solk / job</title>
+  <link rel="icon" href="icons/icon32.png">
   <link rel="stylesheet" href="ui.css">
 </head>
-<body>
-  <header class="top">
-    <h1>Job Radar</h1>
-    <nav class="tabs">
-      <a href="#vacancies" data-view="vacancies">Вакансии</a>
-      <a href="#profile" data-view="profile">Профиль</a>
-      <a href="#sources" data-view="sources">Источники</a>
-      <a href="#log" data-view="log">Журнал и настройки</a>
-    </nav>
-    <span class="spacer"></span>
-    <span id="runState" class="muted small"></span>
-    <button id="runAll">Обойти сейчас</button>
-  </header>
+<body class="app">
+  <main class="home" id="home">
+    <!-- Источники -->
+    <button class="tile t-src t-avito" data-open="avito" type="button">
+      <span class="dot-line"><i class="dot"></i><b class="count"></b></span>
+      <span class="logo-slot" data-logo="avito"></span>
+      <span class="sub"></span>
+    </button>
+    <button class="tile t-src t-generic" data-open="generic" type="button">
+      <span class="dot-line"><i class="dot"></i><b class="count"></b></span>
+      <span class="logo-slot" data-logo="generic"></span>
+      <span class="sub"></span>
+    </button>
+    <button class="tile t-src t-telegram" data-open="telegram" type="button">
+      <span class="dot-line"><i class="dot"></i><b class="count"></b></span>
+      <span class="logo-slot" data-logo="telegram"></span>
+      <span class="sub"></span>
+    </button>
+    <button class="tile t-src t-hh" data-open="hh" type="button">
+      <span class="dot-line"><i class="dot"></i><b class="count"></b></span>
+      <span class="logo-slot" data-logo="hh"></span>
+      <span class="sub"></span>
+    </button>
 
-  <main>
-    <!-- ======== Вакансии ======== -->
-    <section id="view-vacancies" hidden>
-      <div class="toolbar">
-        <input id="q" type="search" placeholder="Поиск по названию, компании, описанию">
-        <select id="fStatus" title="Статус">
-          <option value="active">Активные (без «Скрыто» и «Отказ»)</option>
-          <option value="all">Все статусы</option>
-        </select>
-        <select id="fPlatform" title="Площадка">
-          <option value="">Все площадки</option>
-          <option value="hh">hh.ru</option>
-          <option value="avito">Avito</option>
-          <option value="telegram">Telegram</option>
-          <option value="generic">Сайты компаний</option>
-        </select>
-        <label class="row small">Оценка от
-          <input id="fScore" type="range" min="0" max="100" step="5" value="40">
-          <span id="fScoreVal">40%</span>
-        </label>
-        <select id="fSort" title="Сортировка">
-          <option value="score">Сначала подходящие</option>
-          <option value="date">Сначала свежие</option>
-        </select>
+    <!-- Профиль -->
+    <div class="tile t-profile" data-open="profile" role="button" tabindex="0">
+      <span class="dot-line"><i class="dot"></i><span class="tile-title">Профиль и резюме</span></span>
+      <div class="tile-body" id="profileTile"></div>
+      <span class="tile-more">Настроить →</span>
+    </div>
+
+    <!-- Центральная плитка -->
+    <section class="tile t-main" id="mainTile">
+      <div class="main-top">
+        <div class="clock"><div class="time" id="clockTime">--:--</div><div class="date" id="clockDate"></div></div>
+        <div class="brand"><span class="solk">solk</span><span class="slash-job">/ job</span></div>
       </div>
-      <div id="statusChips" class="chips"></div>
-      <div id="vacList" class="list"></div>
-      <p class="row"><button id="more" hidden>Показать ещё</button></p>
+      <button class="who" id="who" type="button" data-open="profile">
+        <span class="name" id="whoName"></span>
+        <span class="position" id="whoPosition"></span>
+      </button>
+      <button class="find" id="findBtn" type="button">
+        <span class="find-fill" id="findFill"></span>
+        <span class="find-text" id="findText">/ Найти работу</span>
+      </button>
     </section>
 
-    <!-- ======== Профиль ======== -->
-    <section id="view-profile" hidden>
-      <form id="profileForm" class="panel">
-        <h2>Что вы ищете</h2>
-        <div class="form">
-          <label for="pKeywords">Ключевые слова в названии</label>
-          <input id="pKeywords" placeholder="python, backend, бэкенд">
-          <span class="hint muted small">Через запятую. Вакансия получает бонус, если одно из слов есть в её названии.</span>
+    <!-- Лучшее -->
+    <div class="tile t-top" data-open="all" role="button" tabindex="0">
+      <span class="dot-line"><i class="dot"></i><span class="tile-title">Лучшее для вас</span></span>
+      <div class="tile-body" id="topTile"></div>
+    </div>
 
-          <label for="pGrade">Грейд</label>
-          <select id="pGrade">
-            <option value="">Не важно</option>
-            <option value="intern">Стажёр</option>
-            <option value="junior">Junior</option>
-            <option value="middle">Middle</option>
-            <option value="senior">Senior</option>
-            <option value="lead">Lead</option>
-          </select>
+    <!-- Воронка -->
+    <div class="tile t-funnel" data-open="funnel" role="button" tabindex="0">
+      <span class="dot-line"><i class="dot"></i><span class="tile-title">Воронка</span></span>
+      <div class="tile-body" id="funnelTile"></div>
+    </div>
 
-          <label for="pSkills">Навыки и стек</label>
-          <textarea id="pSkills" rows="4" placeholder="*Python, *Django, PostgreSQL, Docker, Redis, Git"></textarea>
-          <span class="hint muted small">Через запятую. Звёздочка — основной стек: вакансии без него опускаются ниже.</span>
+    <!-- Поиск -->
+    <div class="tile t-search" data-open="search" role="button" tabindex="0">
+      <span class="dot-line"><i class="dot"></i><span class="tile-title">Поиск и настройки</span></span>
+      <div class="tile-body" id="searchTile"></div>
+    </div>
 
-          <label for="pSalary">Зарплата от, ₽/мес</label>
-          <input id="pSalary" type="number" min="0" step="10000" placeholder="250000">
-
-          <label>Формат</label>
-          <div class="row">
-            <label class="row"><input type="checkbox" name="fmt" value="remote"> Удалённо</label>
-            <label class="row"><input type="checkbox" name="fmt" value="hybrid"> Гибрид</label>
-            <label class="row"><input type="checkbox" name="fmt" value="office"> Офис</label>
-          </div>
-
-          <label for="pCities">Города для офиса</label>
-          <input id="pCities" placeholder="Москва, Санкт-Петербург">
-
-          <label for="pStop">Стоп-слова</label>
-          <input id="pStop" placeholder="1С, битрикс, gamedev">
-          <span class="hint muted small">Вакансии с этими словами в тексте не показываются.</span>
-
-          <label for="pAge">Не старше, дней</label>
-          <input id="pAge" type="number" min="1" max="90" value="30">
-        </div>
-        <p class="row"><button class="primary" type="submit">Сохранить профиль</button> <span id="profileSaved" class="muted"></span></p>
-      </form>
-
-      <div class="panel">
-        <h2>Резюме</h2>
-        <p class="muted small">Вставьте текст резюме: расширение найдёт в нём навыки и предложит добавить их в профиль. Текст хранится только в вашем браузере.</p>
-        <textarea id="resume" rows="8" placeholder="Скопируйте сюда текст резюме с hh.ru или из PDF"></textarea>
-        <p class="row"><button id="findSkills">Найти навыки в резюме</button></p>
-        <div id="foundSkills" class="chips"></div>
-      </div>
-    </section>
-
-    <!-- ======== Источники ======== -->
-    <section id="view-sources" hidden>
-      <div class="panel">
-        <h2>Добавить источник</h2>
-        <p class="muted small">
-          Проще всего так: откройте на сайте поиск с нужными фильтрами и нажмите на иконку расширения → «Добавить страницу в источники».
-          Или вставьте ссылку сюда: поиск hh.ru, поиск Avito, канал Telegram (t.me/имя) или страницу вакансий компании.
-        </p>
-        <form id="addForm" class="form">
-          <label for="aUrl">Ссылка</label>
-          <input id="aUrl" required placeholder="https://hh.ru/search/vacancy?text=python&order_by=publication_time">
-          <label for="aName">Название</label>
-          <input id="aName" placeholder="hh: Python, удалёнка">
-          <label>Для сайтов компаний</label>
-          <details>
-            <summary class="muted small">Ручная настройка, если вакансии не находятся автоматически</summary>
-            <div class="form" style="margin-top:8px">
-              <label for="aLink">Шаблон ссылки (RegExp)</label>
-              <input id="aLink" placeholder="/vacancies/(\d+)">
-              <label for="aItem">CSS-селектор карточки</label>
-              <input id="aItem" placeholder=".vacancy-card">
-              <label for="aTitle">CSS-селектор названия</label>
-              <input id="aTitle" placeholder=".vacancy-card__title">
-            </div>
-          </details>
-          <span></span>
-          <p class="row"><button class="primary" type="submit">Добавить</button> <span id="addMsg" class="muted"></span></p>
-        </form>
-        <hr style="border:0;border-top:1px solid var(--line);margin:16px 0">
-        <div class="row">
-          <input id="quickQ" placeholder="Быстрый поиск: например, python backend" style="flex:1;min-width:240px">
-          <button id="quickHH">+ поиск на hh.ru</button>
-          <button id="quickAvito">+ поиск на Avito</button>
-        </div>
-      </div>
-
-      <div class="panel">
-        <h2>Ваши источники</h2>
-        <table>
-          <thead><tr><th></th><th>Источник</th><th>Как часто</th><th>Последний обход</th><th>Следующий</th><th></th></tr></thead>
-          <tbody id="srcBody"></tbody>
-        </table>
-      </div>
-    </section>
-
-    <!-- ======== Журнал и настройки ======== -->
-    <section id="view-log" hidden>
-      <form id="settingsForm" class="panel">
-        <h2>Настройки обхода</h2>
-        <div class="form">
-          <label for="sAuto">Автоматический обход</label>
-          <label class="row"><input id="sAuto" type="checkbox"> включён, пока открыт Chrome</label>
-          <label for="sTick">Проверять расписание каждые, мин</label>
-          <input id="sTick" type="number" min="1" max="60">
-          <label for="sLocked">Пропускать, когда экран заблокирован</label>
-          <input id="sLocked" type="checkbox">
-          <label for="sOpen">Где открывать страницы</label>
-          <select id="sOpen">
-            <option value="tab">Фоновая вкладка в текущем окне</option>
-            <option value="window">Отдельное свёрнутое окно</option>
-          </select>
-          <label for="sNotify">Уведомлять об оценке от, %</label>
-          <input id="sNotify" type="number" min="0" max="100" step="5">
-          <label for="sManual">Описаний при ручном сборе</label>
-          <input id="sManual" type="number" min="0" max="50">
-          <label for="sRetention">Хранить нетронутые вакансии, дней</label>
-          <input id="sRetention" type="number" min="7" max="365">
-        </div>
-        <p class="row"><button class="primary" type="submit">Сохранить</button> <span id="settingsSaved" class="muted"></span></p>
-      </form>
-
-      <div class="panel">
-        <h2>Данные</h2>
-        <p class="row">
-          <button id="exportCsv">Скачать вакансии (CSV)</button>
-          <button id="exportJson">Резервная копия (JSON)</button>
-          <label class="row"><button type="button" id="importBtn">Восстановить из JSON</button><input id="importFile" type="file" accept="application/json" hidden></label>
-        </p>
-      </div>
-
-      <div class="panel">
-        <h2>Журнал обходов</h2>
-        <table>
-          <thead><tr><th>Когда</th><th>Источник</th><th>Статус</th><th>Найдено</th><th>Новых</th><th>Ошибка</th></tr></thead>
-          <tbody id="logBody"></tbody>
-        </table>
-      </div>
-    </section>
+    <!-- Отклики -->
+    <div class="tile t-applied" data-open="applied" role="button" tabindex="0">
+      <span class="dot-line"><i class="dot"></i><span class="tile-title">Мои отклики</span></span>
+      <div class="tile-body" id="appliedTile"></div>
+    </div>
   </main>
+
+  <div class="scrim" id="scrim" hidden></div>
+  <aside class="drawer" id="drawer" aria-hidden="true">
+    <header class="drawer-head" id="drawerHead">
+      <div class="drawer-title" id="drawerTitle"></div>
+      <a class="drawer-close" href="#" title="Закрыть (Esc)">×</a>
+    </header>
+    <div class="drawer-body" id="drawerBody"></div>
+  </aside>
+
   <script type="module" src="dashboard.js"></script>
 </body>
 </html>

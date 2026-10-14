@@ -25,7 +25,9 @@ export const STATUSES = [
 export const DEFAULT_SETTINGS = {
   autoRun: true,
   tickMinutes: 5,          // как часто фон проверяет, не пора ли обойти источники
-  notifyScore: 0.6,        // уведомлять о новых вакансиях с оценкой не ниже
+  matchScore: 0.5,         // с какой оценки вакансия считается «подходящей»
+  notifyScore: 0.65,       // уведомлять о новых вакансиях с оценкой не ниже
+  manualGapMin: 10,        // «Найти работу» не трогает источник, если его обходили недавно
   skipWhenLocked: true,    // не обходить, пока экран заблокирован
   openIn: 'tab',           // 'tab' — фоновая вкладка, 'window' — свёрнутое окно
   retentionDays: 45,       // удалять старые вакансии, которые вы не трогали
@@ -40,7 +42,7 @@ export const PLATFORM_DEFAULTS = {
   generic: { intervalMin: 360, cfg: { enrichMax: 5, enrichDelay: [3000, 7000] } },
 };
 
-export const PLATFORM_NAMES = { hh: 'hh.ru', avito: 'Avito', telegram: 'Telegram', generic: 'Сайт' };
+export const PLATFORM_NAMES = { hh: 'hh.ru', avito: 'Avito', telegram: 'Telegram', generic: 'Сайты компаний' };
 
 export function detectPlatformByUrl(url) {
   try {
@@ -107,7 +109,10 @@ export async function getAll() {
 
 // Вакансии вместе с пользовательскими полями.
 export async function getVacancies() {
-  const all = await getAll();
+  return vacanciesFrom(await getAll());
+}
+
+export function vacanciesFrom(all) {
   const out = [];
   for (const [k, v] of Object.entries(all)) {
     if (!k.startsWith('v:')) continue;
@@ -129,4 +134,60 @@ export async function addRun(run) {
   const { runs } = await local.get('runs');
   const next = [run, ...(runs || [])].slice(0, 300);
   await local.set({ runs: next });
+}
+
+// ---------- Резюме ----------
+
+export async function getResume() {
+  const { resume } = await local.get('resume');
+  return resume || null; // { name, size, type, text, uploadedAt }
+}
+export const saveResume = (resume) => (resume ? local.set({ resume }) : local.remove('resume'));
+
+// ---------- Автоматические поиски по желаемой должности ----------
+// Когда в профиле указана должность, создаём (или обновляем) поиск на hh.ru и Avito.
+// Пользователь может выключить или удалить их — тогда мы их не трогаем.
+
+export function autoSearchUrl(platform, query) {
+  const q = encodeURIComponent(query);
+  if (platform === 'hh') return `https://hh.ru/search/vacancy?text=${q}&area=113&order_by=publication_time&search_period=30&items_on_page=50`;
+  if (platform === 'avito') return `https://www.avito.ru/all/vakansii?q=${q}&s=104`;
+  return null;
+}
+
+export async function syncAutoSources(profile) {
+  const query = (profile.position || '').trim();
+  const sources = await getSources();
+  const { autoRemoved } = await local.get('autoRemoved');
+  const removed = new Set(autoRemoved || []);
+  let changed = false;
+  for (const platform of ['hh', 'avito']) {
+    const idx = sources.findIndex((s) => s.auto === platform);
+    if (!query) continue;
+    const url = autoSearchUrl(platform, query);
+    const name = `${PLATFORM_NAMES[platform]}: ${query}`;
+    if (idx >= 0) {
+      if (sources[idx].url !== url) {
+        sources[idx] = { ...sources[idx], url, name };
+        await local.remove(`srcstate:${sources[idx].id}`);
+        changed = true;
+      }
+    } else if (!removed.has(platform)) {
+      sources.push({ ...makeSource(url, { platform, name }), auto: platform });
+      changed = true;
+    }
+  }
+  if (changed) await saveSources(sources);
+  return changed;
+}
+
+export async function removeSource(id) {
+  const sources = await getSources();
+  const src = sources.find((s) => s.id === id);
+  if (src?.auto) {
+    const { autoRemoved } = await local.get('autoRemoved');
+    await local.set({ autoRemoved: [...new Set([...(autoRemoved || []), src.auto])] });
+  }
+  await saveSources(sources.filter((s) => s.id !== id));
+  await local.remove(`srcstate:${id}`);
 }

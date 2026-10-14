@@ -4,7 +4,7 @@
 
 import * as store from './lib/store.js';
 import { normalizeItem, dedupKey } from './lib/parse.js';
-import { scoreVacancy, profileSkills } from './lib/match.js';
+import { scoreAll } from './lib/match.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const rand = (a, b) => a + Math.random() * (b - a);
@@ -21,6 +21,7 @@ async function setupAlarm() {
 chrome.runtime.onInstalled.addListener(async ({ reason }) => {
   await setupAlarm();
   if (reason === 'install') chrome.tabs.create({ url: chrome.runtime.getURL('dashboard.html#profile') });
+  scheduleBadge();
 });
 chrome.runtime.onStartup.addListener(setupAlarm);
 chrome.alarms.onAlarm.addListener((a) => { if (a.name === 'tick') tick().catch(console.error); });
@@ -28,13 +29,15 @@ chrome.alarms.onAlarm.addListener((a) => { if (a.name === 'tick') tick().catch(c
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'local') return;
   if (changes.settings) setupAlarm();
-  if (Object.keys(changes).some((k) => k.startsWith('u:') || k === 'profile')) scheduleBadge();
+  if (Object.keys(changes).some((k) => k.startsWith('u:') || k === 'profile' || k === 'resume')) scheduleBadge();
 });
 
 // ---------- Обход ----------
 
 let running = false;
 let current = null;
+// Прогресс для главной: какие источники в очереди, какой обходится сейчас.
+let progress = { total: 0, done: 0, current: null, queue: [], finishedAt: null };
 
 // MV3 усыпляет service worker через 30 с без событий; во время обхода
 // держим его живым лёгкими вызовами API.
@@ -43,33 +46,74 @@ function keepAlive() {
   return () => clearInterval(t);
 }
 
-async function tick({ force = false, sourceId = null } = {}) {
-  if (running) return { busy: true };
-  const settings = await store.getSettings();
-  if (!force && !settings.autoRun) return { skipped: 'autoRun off' };
-  if (!force && settings.skipWhenLocked && (await chrome.idle.queryState(60)) === 'locked') return { skipped: 'locked' };
+async function planDue(settings, { force = false, sourceId = null } = {}) {
+  const now = Date.now();
+  const sources = (await store.getSources()).filter((s) => (sourceId ? s.id === sourceId : s.enabled));
+  const due = [];
+  for (const s of sources) {
+    const st = await store.getSrcState(s.id);
+    if (sourceId) { due.push(s); continue; }
+    if (force) {
+      // «Найти работу» не дёргает источник, который только что обходили.
+      const fresh = st.lastRunAt && now - Date.parse(st.lastRunAt) < settings.manualGapMin * 60e3 && st.lastStatus !== 'failed';
+      if (!fresh) due.push(s);
+      continue;
+    }
+    if (!st.nextRunAt || Date.parse(st.nextRunAt) <= now) due.push(s);
+  }
+  return due;
+}
 
-  running = true;
+// Вызывающий код уже выставил running = true.
+async function runQueue(due, settings) {
   const stop = keepAlive();
   try {
-    const now = Date.now();
-    const sources = (await store.getSources()).filter((s) => (sourceId ? s.id === sourceId : s.enabled));
-    const due = [];
-    for (const s of sources) {
-      const st = await store.getSrcState(s.id);
-      if (sourceId || force || !st.nextRunAt || Date.parse(st.nextRunAt) <= now) due.push(s);
-    }
+    progress = { total: due.length, done: 0, current: null, queue: due.map((s) => ({ id: s.id, platform: s.platform, name: s.name })), finishedAt: null };
     for (let i = 0; i < due.length; i++) {
       if (i > 0) await sleep(rand(...settings.pauseBetweenSources));
       current = due[i].name;
+      progress.current = progress.queue.shift();
       await runSource(due[i], settings);
+      progress.done++;
     }
     await cleanup(settings);
-    return { ran: due.length };
   } finally {
     running = false;
     current = null;
+    progress = { ...progress, current: null, queue: [], finishedAt: new Date().toISOString() };
     stop();
+  }
+}
+
+// Плановый обход по будильнику.
+async function tick() {
+  if (running) return;
+  running = true;
+  try {
+    const settings = await store.getSettings();
+    const skip = !settings.autoRun || (settings.skipWhenLocked && (await chrome.idle.queryState(60)) === 'locked');
+    const due = skip ? [] : await planDue(settings);
+    if (!due.length) { running = false; return; }
+    await runQueue(due, settings);
+  } catch (e) {
+    running = false;
+    throw e;
+  }
+}
+
+// Ручной запуск: кнопка «Найти работу» или «Искать» у источника.
+async function startManual(sourceId) {
+  if (running) return { busy: true, current };
+  running = true;
+  try {
+    const settings = await store.getSettings();
+    const due = await planDue(settings, { force: true, sourceId });
+    if (!due.length) { running = false; return { started: false, total: 0 }; }
+    runQueue(due, settings).catch(console.error);
+    return { started: true, total: due.length };
+  } catch (e) {
+    running = false;
+    throw e;
   }
 }
 
@@ -172,9 +216,7 @@ async function ingest(items, platform, sourceName) {
   const now = new Date();
   const nowIso = now.toISOString();
   const all = await store.getAll();
-  const profile = await store.getProfile();
   const settings = await store.getSettings();
-  const ps = profileSkills(profile);
 
   const byDedup = new Map();
   for (const [k, v] of Object.entries(all)) {
@@ -225,18 +267,28 @@ async function ingest(items, platform, sourceName) {
     write[key] = v;
     if (d) byDedup.set(d, key);
     added++;
-    const sc = scoreVacancy(v, profile, now.getTime(), ps);
-    if (sc.score >= settings.notifyScore) fresh.push({ v, score: sc.score });
+    fresh.push(key);
   }
 
   if (Object.keys(write).length) await chrome.storage.local.set(write);
+  if (fresh.length) await notifyFresh(new Set(fresh), settings);
+  scheduleBadge();
+  return { found: items.length, added, updated };
+}
+
+async function scored() {
+  const [vs, profile, resume] = await Promise.all([store.getVacancies(), store.getProfile(), store.getResume()]);
+  return scoreAll(vs, profile, resume?.text || '');
+}
+
+async function notifyFresh(keys, settings) {
+  const fresh = (await scored()).filter(({ v, s }) => keys.has(v.key) && s.score >= settings.notifyScore)
+    .map(({ v, s }) => ({ v, score: s.score }));
   if (fresh.length) {
     fresh.sort((a, b) => b.score - a.score);
     notify(`new:${Date.now()}`, `Новых подходящих вакансий: ${fresh.length}`,
       fresh.slice(0, 3).map((f) => `${Math.round(f.score * 100)}% · ${f.v.title}${f.v.company ? ` — ${f.v.company}` : ''}`).join('\n'));
   }
-  scheduleBadge();
-  return { found: items.length, added, updated };
 }
 
 async function cleanup(settings) {
@@ -271,11 +323,9 @@ function scheduleBadge() {
   badgeTimer = setTimeout(updateBadge, 500);
 }
 async function updateBadge() {
-  const [vs, profile, settings] = await Promise.all([store.getVacancies(), store.getProfile(), store.getSettings()]);
-  const ps = profileSkills(profile);
-  const now = Date.now();
-  const n = vs.filter((v) => v.status === 'new' && scoreVacancy(v, profile, now, ps).score >= settings.notifyScore).length;
-  await chrome.action.setBadgeBackgroundColor({ color: '#2f6fed' });
+  const settings = await store.getSettings();
+  const n = (await scored()).filter(({ v, s }) => v.status === 'new' && s.score >= settings.matchScore).length;
+  await chrome.action.setBadgeBackgroundColor({ color: '#b81400' });
   await chrome.action.setBadgeText({ text: n ? String(n > 999 ? '999+' : n) : '' });
 }
 
@@ -297,12 +347,8 @@ async function collectFromTab(tabId) {
 }
 
 const handlers = {
-  async runNow({ sourceId }) {
-    if (running) return { busy: true, current };
-    tick({ force: true, sourceId }).catch(console.error);
-    return { started: true };
-  },
-  status: async () => ({ running, current }),
+  runNow: ({ sourceId }) => startManual(sourceId),
+  status: async () => ({ running, current, progress }),
   collectTab: ({ tabId }) => collectFromTab(tabId),
   async addSource({ url, name, platform }) {
     const sources = await store.getSources();
