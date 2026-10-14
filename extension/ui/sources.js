@@ -49,6 +49,7 @@ function stateLine(st) {
     if (st.lastAdded) parts.push(`новых ${st.lastAdded}`);
     if (st.lastDetailed) parts.push(`описаний ${st.lastDetailed}`);
     if (st.lastStatus === 'partial') parts.push('остановлено проверкой');
+    if (st.lastStatus === 'stopped') parts.push('остановлено вами');
   }
   return parts.join(' · ');
 }

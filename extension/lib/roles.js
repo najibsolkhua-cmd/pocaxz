@@ -53,9 +53,9 @@ export function suggestTitles(position, have = [], resumeText = '') {
     }
     const lower = (resumeText || '').toLowerCase();
     const inResume = lower ? fam.filter((t) => lower.includes(t.toLowerCase())).length : 0;
-    // Семейство подходит, если должность почти совпадает с одним из названий
-    // или в резюме упомянуто несколько названий из него.
-    if (best < 0.6 && inResume < 2) continue;
+    // Семейство подходит, только если должность почти совпадает с одним из названий.
+    // Резюме лишь поднимает подходящие названия выше, но не добавляет чужие профессии.
+    if (best < 0.6) continue;
     const score = best + inResume * 0.15;
     for (const t of fam) {
       if (taken.has(t.toLowerCase())) continue;

@@ -72,7 +72,8 @@ test('синонимы должности и пример вакансии по�
   const plain = scoreVacancy(v, base);
   const withAlt = scoreVacancy(v, { ...base, titleKeywords: ['Бренд-менеджер'] });
   const withEx = scoreVacancy(v, { ...base, examples: [{ title: 'Бренд-менеджер', text: 'бренд, позиционирование, агентства' }] });
-  assert.equal(plain.parts.title, 0);
-  assert.equal(withAlt.parts.title, 1);
-  assert.ok(withAlt.score > plain.score && withEx.score > plain.score, `${plain.score} ${withAlt.score} ${withEx.score}`);
+  assert.equal(plain.excluded, 'другая должность');
+  assert.equal(withAlt.where, 'title');
+  assert.equal(withEx.where, 'title');
+  assert.ok(withAlt.score > 0.5 && withEx.score > 0.5, `${withAlt.score} ${withEx.score}`);
 });

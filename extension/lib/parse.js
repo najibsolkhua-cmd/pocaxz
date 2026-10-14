@@ -128,6 +128,20 @@ export function parseFormats(text) {
   return [...out];
 }
 
+// ---------- Тип занятости ----------
+
+export const EMPLOYMENT = [['full', 'Полная'], ['part', 'Частичная'], ['project', 'Проектная / разовая'], ['intern', 'Стажировка']];
+
+export function parseEmployment(text) {
+  const t = (text || '').toLowerCase();
+  const out = new Set();
+  if (/полн(ая|ой|ую)\s+занятост|полный\s+(рабочий\s+)?день|full[- ]?time|5\/2/u.test(t)) out.add('full');
+  if (/частичн(ая|ой|ую)\s+занятост|неполн(ый|ая|ой)\s+(рабочий\s+)?(день|занятост)|part[- ]?time|подработк|совмещени/u.test(t)) out.add('part');
+  if (/проектн(ая|ой|ую)\s+(работ|занятост)|разов(ая|ое|ые)\s+(задани|работ|проект)|фриланс|freelance|на проект(?![\p{L}])/u.test(t)) out.add('project');
+  if (/стажировк|стаж[её]р(?![\p{L}])|internship|trainee/u.test(t)) out.add('intern');
+  return [...out];
+}
+
 // ---------- Даты ----------
 
 const MONTHS = {

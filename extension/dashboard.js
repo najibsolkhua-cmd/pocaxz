@@ -2,7 +2,7 @@
 // профиль, лучшее, воронка, отклики и панели, которые выезжают справа.
 
 import * as store from './lib/store.js';
-import { DEFAULT_PROFILE, scoreAll, profileSkills } from './lib/match.js';
+import { DEFAULT_PROFILE, scoreAll, profileSkills, exclusionStats } from './lib/match.js';
 import { $, h, logo, fmtTime, ago, daysSince, plural, download } from './ui/dom.js';
 import { createVacancyList } from './ui/vacancies.js';
 import { renderProfile } from './ui/profile.js';
@@ -23,7 +23,9 @@ const state = {
 async function loadState() {
   const all = await chrome.storage.local.get(null);
   state.all = all;
-  state.profile = { ...DEFAULT_PROFILE, ...(all.profile || {}) };
+  state.profile = store.sanitizeProfile(all.profile);
+  state.profiles = all.profiles || [{ id: 'p1', title: 'Профиль 1' }];
+  state.activeProfile = all.activeProfile || 'p1';
   state.settings = { ...store.DEFAULT_SETTINGS, ...(all.settings || {}) };
   state.sources = all.sources || [];
   state.resume = all.resume || null;
@@ -113,10 +115,13 @@ function renderMain() {
   const { running, progress } = state.status;
   const btn = $('findBtn');
   btn.classList.toggle('busy', running);
+  $('stopBtn').hidden = !running;
   if (running && progress?.total) {
     const cur = progress.current;
-    const step = progress.detail ? ` · читаю описания` : progress.page ? ` · стр. ${progress.page}, ${progress.found || 0} вак.` : '';
-    $('findText').textContent = `Ищу: ${cur ? cur.name : '…'}${step} · источник ${Math.min(progress.done + 1, progress.total)} из ${progress.total}`;
+    // Коротко, в одну строку: площадка · страница · сколько собрано · какой источник по счёту.
+    const step = progress.detail ? 'описания' : progress.page ? `стр. ${progress.page} · ${progress.found || 0} вак.` : 'открываю';
+    $('findText').textContent = `Ищу: ${cur ? store.PLATFORM_NAMES[cur.platform] : '…'} · ${step} · ${Math.min(progress.done + 1, progress.total)}/${progress.total}`;
+    btn.title = cur ? `Сейчас: ${cur.name}` : '';
     $('findFill').style.width = `${Math.round((progress.done / progress.total) * 100)}%`;
   } else if (running) {
     $('findText').textContent = 'Ищу…';
@@ -129,6 +134,8 @@ function renderMain() {
 
 function renderProfileTile() {
   const p = state.profile;
+  const cur = state.profiles.find((x) => x.id === state.activeProfile);
+  document.querySelector('.t-profile .tile-title').textContent = state.profiles.length > 1 ? `Профиль: ${cur?.title || ''}` : 'Профиль и резюме';
   const el = $('profileTile');
   const ps = profileSkills(p);
   const empty = !p.position && !ps.length && !state.resume;
@@ -277,14 +284,16 @@ function closeDrawer() {
 
 function buildListDrawer(body, opts) {
   const list = createVacancyList({ ...opts, matchScore: state.settings.matchScore });
-  body.replaceChildren(list.el);
-  list.update(state.scored);
-  drawer.refresh = () => list.update(state.scored);
+  const excl = h('div', {});
+  body.replaceChildren(excl, list.el);
+  drawer.refresh = () => { excl.replaceChildren(exclusionLine(state.scored)); list.update(state.scored); };
+  drawer.refresh();
 }
 
 function buildPlatformDrawer(body, platform) {
   const list = createVacancyList({ platform, matchScore: state.settings.matchScore });
   const stats = h('div', { class: 'stats' });
+  const excl = h('div', {});
   const srcBox = h('div', {});
   const autoNote = (platform === 'hh' || platform === 'avito')
     ? h('p', { class: 'muted small' }, state.profile.position
@@ -293,6 +302,7 @@ function buildPlatformDrawer(body, platform) {
     : null;
   body.replaceChildren(
     stats,
+    excl,
     h('section', { class: 'dsec' }, h('h3', {}, 'Подходящие вакансии'), list.el),
     h('section', { class: 'dsec' }, h('h3', {}, 'Источники'), autoNote, srcBox, addSourceForm(platform)));
 
@@ -306,10 +316,21 @@ function buildPlatformDrawer(body, platform) {
       stat(rows.length, 'собрано', `Проверяем до ${state.settings.scanLimit} в каждом источнике — лимит меняется на главной`),
       stat(good.length, 'подходят вам', `С оценкой «Подходит мне» от ${Math.round(state.settings.matchScore * 100)}%`),
       stat(good.filter(({ v }) => v.status === 'new').length, 'ещё не смотрели'));
+    excl.replaceChildren(exclusionLine(rows));
     list.update(rows);
     if (!isEditing(srcBox)) srcBox.replaceChildren(sourceRows(srcs, state.all));
   };
   drawer.refresh();
+}
+
+// «Отсеяно фильтрами профиля: 120 — другая должность 90, другой город 25».
+function exclusionLine(rows) {
+  const by = exclusionStats(rows);
+  const total = Object.values(by).reduce((a, b) => a + b, 0);
+  if (!total) return h('div', { class: 'excl', hidden: true });
+  const parts = Object.entries(by).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${k} — ${n}`).join(', ');
+  return h('div', { class: 'excl' }, 'Отсеяно по вашему профилю: ', h('b', {}, total), ` (${parts}). `,
+    h('a', { href: '#profile' }, 'Изменить фильтры в профиле'));
 }
 
 const stat = (n, label, title) => h('div', { class: 'stat', title }, h('b', {}, typeof n === 'number' ? n.toLocaleString('ru-RU') : n), h('span', {}, label));
@@ -323,7 +344,15 @@ const isEditing = (box) => {
 
 async function buildProfileDrawer(body) {
   drawer.refresh = null; // форму не перерисовываем на лету
-  await renderProfile(body, { onSaved: () => toast('Профиль сохранён') });
+  await renderProfile(body, {
+    onSaved: () => toast('Профиль сохранён — оценки всех вакансий пересчитаны'),
+    onSwitched: async () => {
+      await loadState();
+      renderHome();
+      await buildProfileDrawer(body);
+      toast(`Профиль: ${state.profiles.find((x) => x.id === state.activeProfile)?.title || ''}`);
+    },
+  });
 }
 
 function buildSearchDrawer(body) {
@@ -382,7 +411,16 @@ function buildSearchDrawer(body) {
         h('button', { class: 'btn', type: 'button', onclick: exportCsv }, 'Скачать вакансии (Excel/CSV)'),
         h('button', { class: 'btn', type: 'button', onclick: async () => download(`solk-job-backup-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(await chrome.storage.local.get(null)), 'application/json') }, 'Резервная копия'),
         h('button', { class: 'btn', type: 'button', onclick: () => importFile.click() }, 'Восстановить из копии'),
-        importFile)),
+        importFile),
+      h('div', { class: 'danger-zone' },
+        h('div', {}, h('b', {}, 'Сбросить статистику'),
+          h('p', { class: 'muted small' }, 'Удалит все собранные вакансии, статусы откликов, заметки и журнал. Источники, профили, резюме и настройки останутся.')),
+        h('button', { class: 'btn danger', type: 'button', onclick: async () => {
+          if (!confirm('Сбросить всю статистику? Собранные вакансии, статусы откликов и заметки будут удалены.')) return;
+          if (!confirm('Точно? Это нельзя отменить. Если нужно — сначала сделайте «Резервную копию».')) return;
+          const n = await store.resetStats();
+          toast(`Статистика сброшена: удалено ${n} вакансий. Нажмите «/ Найти работу», чтобы собрать заново.`);
+        } }, 'Сбросить статистику'))),
     h('section', { class: 'dsec' }, h('h3', {}, 'Журнал поиска'),
       h('table', { class: 'log' }, h('thead', {}, h('tr', {}, ['Когда', 'Источник', 'Итог', 'Найдено', 'Новых', 'Комментарий'].map((t) => h('th', {}, t)))), logBody)));
 
@@ -390,7 +428,7 @@ function buildSearchDrawer(body) {
     if (!isEditing(srcBox)) srcBox.replaceChildren(sourceRows(state.sources, state.all));
     const runs = (state.all.runs || []).slice(0, 60);
     logBody.replaceChildren(...(runs.length ? runs.map((r) => h('tr', {},
-      h('td', {}, fmtTime(r.at)), h('td', {}, r.source), h('td', { class: `st-${r.status}` }, { ok: 'ok', empty: 'пусто', failed: 'ошибка', blocked: 'проверка' }[r.status] || r.status),
+      h('td', {}, fmtTime(r.at)), h('td', {}, r.source), h('td', { class: `st-${r.status}` }, { ok: 'ok', empty: 'пусто', failed: 'ошибка', blocked: 'проверка', partial: 'частично', stopped: 'остановлено' }[r.status] || r.status),
       h('td', {}, r.found ?? ''), h('td', {}, r.added ?? ''), h('td', { class: 'muted' }, r.error || '')))
       : [h('tr', {}, h('td', { colspan: 6, class: 'empty' }, 'Поиска ещё не было.'))]));
   };
@@ -495,7 +533,21 @@ function bind() {
     el.addEventListener('keydown', (e) => { if (e.key === 'Enter' && e.target === el) go(e); });
   });
   $('who').addEventListener('click', (e) => { e.stopPropagation(); location.hash = 'profile'; });
-  $('findBtn').addEventListener('click', (e) => { e.stopPropagation(); findWork(); });
+  $('findBtn').addEventListener('click', async (e) => {
+    e.stopPropagation();
+    // Состояние на странице может отставать на секунду — спрашиваем фон напрямую.
+    const st = await send({ type: 'status' }).catch(() => null);
+    if (st?.running) { toast('Поиск уже идёт — его можно остановить кнопкой «Стоп»'); return; }
+    findWork();
+  });
+  $('stopBtn').addEventListener('click', async (e) => {
+    e.stopPropagation();
+    await send({ type: 'stop' });
+    $('findText').textContent = 'Останавливаю…';
+    toast('Поиск остановлен. Найденное сохранено — поправьте профиль и нажмите «/ Найти работу» снова.');
+    startedHere = false;
+    pollStatus();
+  });
   document.querySelectorAll('.limit button').forEach((b) => b.addEventListener('click', () => setLimit(b.dataset.limit)));
   $('limitInput').addEventListener('change', (e) => setLimit(e.target.value));
   $('limitInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') e.target.blur(); });
@@ -507,6 +559,7 @@ function bind() {
 }
 
 bind();
+await store.ensureProfiles();
 renderClock();
 setInterval(renderClock, 5000);
 await loadState();

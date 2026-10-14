@@ -1,10 +1,12 @@
 // Хранилище поверх chrome.storage.local.
 //
 // Ключи:
-//   profile, settings, sources, runs
-//   srcstate:<sourceId>  — состояние источника (пишет только фон)
-//   v:<platform>:<id>    — вакансия (пишет только фон)
-//   u:<platform>:<id>    — статус/заметка пользователя (пишет только CRM)
+//   profile, resume        — активный профиль и его резюме (копия profile:<id>, resume:<id>)
+//   profiles, activeProfile — список профилей и активный
+//   settings, sources, runs
+//   srcstate:<sourceId>    — состояние источника (пишет только фон)
+//   v:<platform>:<id>      — вакансия, общая для всех профилей (пишет только фон)
+//   u:<platform>:<id>      — статус/заметка в первом профиле, u@<profileId>:… — в остальных
 // Разделение v:/u: нужно, чтобы фоновый сбор не затёр статус, который вы
 // поменяли в ту же секунду.
 
@@ -68,9 +70,24 @@ export function normalizeSourceUrl(url, platform) {
 
 export async function getProfile() {
   const { profile } = await local.get('profile');
-  return { ...DEFAULT_PROFILE, ...(profile || {}) };
+  return sanitizeProfile(profile);
 }
-export const saveProfile = (profile) => local.set({ profile });
+
+export function sanitizeProfile(profile) {
+  const p = { ...DEFAULT_PROFILE, ...(profile || {}) };
+  // Из старого автозаполнения в названия могли попасть поля резюме («Тип занятости: …»).
+  p.titleKeywords = (p.titleKeywords || []).filter((t) => !/:|занятост/i.test(t));
+  return p;
+}
+export async function saveProfile(profile) {
+  const { activeProfile, profiles } = await local.get(['activeProfile', 'profiles']);
+  const pid = activeProfile || 'p1';
+  // Название профиля следует за должностью, пока вы не переименовали его вручную.
+  const list = (profiles || [{ id: pid }]).map((x) => (x.id === pid && !x.named ? { ...x, title: profileTitle(profile, x.title) } : x));
+  await local.set({ profile, [`profile:${pid}`]: profile, profiles: list, activeProfile: pid });
+}
+
+const profileTitle = (p, fallback) => (p.position || '').trim() || (p.name || '').trim() || fallback || 'Профиль';
 
 export async function getSettings() {
   const { settings } = await local.get('settings');
@@ -116,11 +133,16 @@ export async function getVacancies() {
   return vacanciesFrom(await getAll());
 }
 
+// Ключ статуса вакансии для профиля: первый профиль хранит статусы как раньше («u:…»).
+export const uPrefix = (pid) => (!pid || pid === 'p1' ? 'u' : `u@${pid}`);
+export const uKeyFor = (vKey, pid) => `${uPrefix(pid)}${vKey.slice(1)}`;
+
 export function vacanciesFrom(all) {
   const out = [];
+  const pid = all.activeProfile || 'p1';
   for (const [k, v] of Object.entries(all)) {
     if (!k.startsWith('v:')) continue;
-    const u = all[`u${k.slice(1)}`] || {};
+    const u = all[uKeyFor(k, pid)] || {};
     // Снятые с публикации вакансии пропадают, если вы с ними ещё не работали.
     if (v.archived && !['applied', 'interview', 'offer'].includes(u.status)) continue;
     out.push({ ...v, status: u.status || 'new', note: u.note || '', statusChangedAt: u.statusChangedAt || null });
@@ -129,7 +151,8 @@ export function vacanciesFrom(all) {
 }
 
 export async function setUserFields(vKey, patch) {
-  const uKey = `u${vKey.slice(1)}`;
+  const { activeProfile } = await local.get('activeProfile');
+  const uKey = uKeyFor(vKey, activeProfile);
   const cur = (await local.get(uKey))[uKey] || {};
   const next = { ...cur, ...patch };
   if (patch.status && patch.status !== cur.status) next.statusChangedAt = new Date().toISOString();
@@ -148,16 +171,85 @@ export async function getResume() {
   const { resume } = await local.get('resume');
   return resume || null; // { name, size, type, text, uploadedAt }
 }
-export const saveResume = (resume) => (resume ? local.set({ resume }) : local.remove('resume'));
+export async function saveResume(resume) {
+  const { activeProfile } = await local.get('activeProfile');
+  const pid = activeProfile || 'p1';
+  if (resume) await local.set({ resume, [`resume:${pid}`]: resume });
+  else await local.remove(['resume', `resume:${pid}`]);
+}
+
+// ---------- Несколько профилей ----------
+// Профиль = должность, резюме, фильтры и статусы откликов. Источники и собранные
+// вакансии общие: новый профиль сразу видит всё собранное, но отбирает по-своему.
+
+export async function ensureProfiles() {
+  const all = await local.get(['profiles', 'activeProfile', 'profile', 'resume']);
+  if (all.profiles?.length && all.activeProfile) return { profiles: all.profiles, active: all.activeProfile };
+  const p = all.profile || {};
+  const profiles = [{ id: 'p1', title: profileTitle(p, 'Профиль 1') }];
+  await local.set({ profiles, activeProfile: 'p1', 'profile:p1': p, ...(all.resume ? { 'resume:p1': all.resume } : {}) });
+  return { profiles, active: 'p1' };
+}
+
+// Сохраняем активный профиль в его «ячейку» и загружаем другой.
+export async function switchProfile(id) {
+  const { profiles, active } = await ensureProfiles();
+  if (!profiles.some((x) => x.id === id) || id === active) return;
+  const cur = await local.get(['profile', 'resume']);
+  const next = await local.get([`profile:${id}`, `resume:${id}`]);
+  await local.set({ [`profile:${active}`]: cur.profile || {}, ...(cur.resume ? { [`resume:${active}`]: cur.resume } : {}) });
+  const profile = next[`profile:${id}`] || {};
+  await local.set({ activeProfile: id, profile });
+  if (next[`resume:${id}`]) await local.set({ resume: next[`resume:${id}`] });
+  else await local.remove('resume');
+  await syncAutoSources({ ...DEFAULT_PROFILE, ...profile });
+}
+
+// Новый профиль — с чистыми данными; источники остаются.
+export async function createProfile(title) {
+  const { profiles, active } = await ensureProfiles();
+  const cur = await local.get(['profile', 'resume']);
+  await local.set({ [`profile:${active}`]: cur.profile || {}, ...(cur.resume ? { [`resume:${active}`]: cur.resume } : {}) });
+  const id = `p${Date.now().toString(36)}`;
+  const t = (title || '').trim() || `Профиль ${profiles.length + 1}`;
+  await local.set({ profiles: [...profiles, { id, title: t }], activeProfile: id, profile: {}, [`profile:${id}`]: {} });
+  await local.remove('resume');
+  return id;
+}
+
+export async function deleteProfile(id) {
+  const { profiles, active } = await ensureProfiles();
+  if (profiles.length <= 1) return false;
+  const rest = profiles.filter((x) => x.id !== id);
+  if (id === active) await switchProfile(rest[0].id);
+  const all = await local.get(null);
+  const prefix = `${uPrefix(id)}:`;
+  const drop = [`profile:${id}`, `resume:${id}`, ...Object.keys(all).filter((k) => id !== 'p1' && k.startsWith(prefix))];
+  await local.remove(drop);
+  await local.set({ profiles: rest });
+  return true;
+}
+
+// Сброс статистики: собранные вакансии, статусы, журнал и состояние источников.
+// Источники, профили, резюме и настройки остаются.
+export async function resetStats() {
+  const all = await local.get(null);
+  const drop = Object.keys(all).filter((k) => k.startsWith('v:') || k.startsWith('u:') || k.startsWith('u@') || k.startsWith('srcstate:') || k === 'runs');
+  await local.remove(drop);
+  return drop.filter((k) => k.startsWith('v:')).length;
+}
 
 // ---------- Автоматические поиски по желаемой должности ----------
 // Когда в профиле указана должность, создаём (или обновляем) поиск на hh.ru и Avito.
 // Пользователь может выключить или удалить их — тогда мы их не трогаем.
 
 // hh.ru понимает OR и кавычки — ищем сразу по должности и её синонимам.
+// «Product Marketing Manager (PMM)» → «Product Marketing Manager» и «PMM».
+const titleVariants = (t) => (t || '').split(/[()/|,;]+/).map((x) => x.replace(/\s+/g, ' ').trim()).filter((x) => x.length >= 2);
+
 export function hhQuery(profile) {
-  const titles = [profile.position, ...(profile.titleKeywords || [])].map((t) => (t || '').trim()).filter(Boolean);
-  const uniq = [...new Map(titles.map((t) => [t.toLowerCase(), t])).values()].slice(0, 5);
+  const titles = [profile.position, ...(profile.titleKeywords || [])].flatMap(titleVariants);
+  const uniq = [...new Map(titles.map((t) => [t.toLowerCase(), t])).values()].slice(0, 6);
   return uniq.map((t) => (/\s/.test(t) ? `"${t}"` : t)).join(' OR ');
 }
 
@@ -169,7 +261,7 @@ export function autoSearchUrl(platform, profileOrQuery) {
     return `https://hh.ru/search/vacancy?text=${q}&area=${city?.hh || 113}&order_by=publication_time&search_period=30&items_on_page=50`;
   }
   if (platform === 'avito') {
-    return `https://www.avito.ru/${city?.avito || 'all'}/vakansii?q=${encodeURIComponent(profile.position.trim())}&s=104`;
+    return `https://www.avito.ru/${city?.avito || 'all'}/vakansii?q=${encodeURIComponent(titleVariants(profile.position)[0] || profile.position.trim())}&s=104`;
   }
   return null;
 }

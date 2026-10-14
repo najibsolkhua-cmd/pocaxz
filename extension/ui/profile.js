@@ -2,7 +2,8 @@
 // чем вы занимаетесь, примеры подходящих вакансий, навыки, условия.
 
 import * as store from '../lib/store.js';
-import { extractSkills, SKILL_NAMES, resolveSkill } from '../lib/parse.js';
+import { extractSkills, SKILL_NAMES, resolveSkill, EMPLOYMENT } from '../lib/parse.js';
+import { DEFAULT_PROFILE } from '../lib/match.js';
 import { SKILLS } from '../lib/skills.js';
 import { CITIES, canonicalCity } from '../lib/geo.js';
 import { readResumeFile } from '../lib/resume.js';
@@ -61,7 +62,41 @@ function chipEditor(values, { placeholder, list, normalize = (x) => x, star = fa
 
 const skillLabel = (name) => { const r = resolveSkill(name); return r && !r.custom ? r.name : name.trim(); };
 
-export async function renderProfile(container, { onSaved } = {}) {
+// Полоса профилей: переключение, новый профиль, переименование, удаление.
+async function profilesBar(isDirty, onSwitched) {
+  const { profiles, active } = await store.ensureProfiles();
+  const guard = () => !isDirty() || confirm('В профиле есть несохранённые изменения. Продолжить без сохранения?');
+  const sel = h('select', { class: 'profile-select', title: 'Активный профиль', onchange: async (e) => {
+    if (!guard()) { e.target.value = active; return; }
+    await store.switchProfile(e.target.value);
+    onSwitched?.();
+  } }, profiles.map((x) => h('option', { value: x.id, selected: x.id === active }, x.title)));
+  return h('div', { class: 'profiles-bar' },
+    h('span', { class: 'field-label' }, 'Профиль'),
+    sel,
+    h('button', { type: 'button', class: 'btn small', onclick: async () => {
+      if (!guard()) return;
+      const t = prompt('Название нового профиля (например, «Продакт-маркетолог»). Резюме, должность и фильтры будут пустыми, источники останутся общими.', '');
+      if (t === null) return;
+      await store.createProfile(t);
+      onSwitched?.();
+    } }, '+ Новый профиль'),
+    h('button', { type: 'button', class: 'btn small ghost', onclick: async () => {
+      const cur = profiles.find((x) => x.id === active);
+      const t = prompt('Новое название профиля', cur?.title || '');
+      if (!t?.trim()) return;
+      await chrome.storage.local.set({ profiles: profiles.map((x) => (x.id === active ? { ...x, title: t.trim(), named: true } : x)) });
+      onSwitched?.();
+    } }, 'Переименовать'),
+    profiles.length > 1 ? h('button', { type: 'button', class: 'btn small ghost', onclick: async () => {
+      const cur = profiles.find((x) => x.id === active);
+      if (!confirm(`Удалить профиль «${cur?.title}»? Его резюме, фильтры и статусы откликов удалятся. Источники и собранные вакансии останутся.`)) return;
+      await store.deleteProfile(active);
+      onSwitched?.();
+    } }, 'Удалить') : null);
+}
+
+export async function renderProfile(container, { onSaved, onSwitched } = {}) {
   const p = await store.getProfile();
   let resume = await store.getResume();
   let dirty = false;
@@ -93,6 +128,26 @@ export async function renderProfile(container, { onSaved } = {}) {
     type: 'button', class: formats.has(k) ? 'on' : '', 'data-v': k,
     onclick: (e) => { formats.has(k) ? formats.delete(k) : formats.add(k); e.currentTarget.classList.toggle('on'); markDirty(); },
   }, label)));
+  const employment = new Set(p.employment || []);
+  const empSeg = h('div', { class: 'seg' }, EMPLOYMENT.map(([k, label]) => h('button', {
+    type: 'button', class: employment.has(k) ? 'on' : '', 'data-v': k,
+    onclick: (e) => { employment.has(k) ? employment.delete(k) : employment.add(k); e.currentTarget.classList.toggle('on'); markDirty(); },
+  }, label)));
+
+  // Где должна встречаться должность, чтобы вакансия считалась вашей.
+  const matchIn = { ...DEFAULT_PROFILE.matchIn, ...(p.matchIn || {}) };
+  const MATCH_IN = [['title', 'В названии вакансии'], ['company', 'В названии компании'], ['description', 'В описании вакансии']];
+  const matchSeg = h('div', { class: 'seg' }, MATCH_IN.map(([k, label]) => h('button', {
+    type: 'button', class: matchIn[k] ? 'on' : '',
+    onclick: (e) => {
+      matchIn[k] = !matchIn[k];
+      if (!Object.values(matchIn).some(Boolean)) matchIn.title = true; // хотя бы одно место
+      [...matchSeg.children].forEach((b, i) => b.classList.toggle('on', matchIn[MATCH_IN[i][0]]));
+      e.currentTarget.blur();
+      markDirty();
+    },
+  }, label)));
+
   const setGrade = (g) => { grade = g; [...gradeSeg.children].forEach((b) => b.classList.toggle('on', b.dataset.v === g)); };
   const setFormats = (arr) => { formats.clear(); arr.forEach((x) => formats.add(x)); [...formatSeg.children].forEach((b) => b.classList.toggle('on', formats.has(b.dataset.v))); };
 
@@ -239,6 +294,8 @@ export async function renderProfile(container, { onSaved } = {}) {
       skills: [...skills.values],
       minSalary: Number(f.salary.value) || 0,
       formats: [...formats],
+      employment: [...employment],
+      matchIn: { ...matchIn },
       cities: [...cities.values],
       stopWords: [...stops.values],
       maxAgeDays: Number(f.age.value) || 30,
@@ -266,7 +323,8 @@ export async function renderProfile(container, { onSaved } = {}) {
       h('h3', {}, 'Кто вы и что ищете'),
       field('Имя', f.name),
       field('Желаемая должность', f.position, 'По ней настраивается поиск на hh.ru и Avito.'),
-      field('Другие названия должности', h('div', {}, titles.el, suggestBox), 'Вакансия с любым из этих названий считается «вашей». Через запятую или Enter.'),
+      field('Другие названия должности', h('div', {}, titles.el, suggestBox), 'Вакансия с любым из этих названий считается «вашей». Можно по-английски: Marketing manager = менеджер по маркетингу. Через запятую или Enter.'),
+      field('Искать должность только', matchSeg, 'Вакансия показывается, только если ваша должность (или одно из названий выше) есть в отмеченных местах. Вакансии с должностью в названии — всегда выше.'),
       field('Чем я занимаюсь', f.about),
       field('Примеры подходящих вакансий', h('div', {}, exList, h('div', { class: 'row' }, exInput, exButton), exMsg),
         'Вставьте ссылку на вакансию, которая вам нравится, — найдём похожие, даже если названия отличаются.')),
@@ -278,13 +336,14 @@ export async function renderProfile(container, { onSaved } = {}) {
       h('h3', {}, 'Условия'),
       field('Грейд', gradeSeg),
       field('Зарплата от, ₽ в месяц', f.salary),
-      field('Формат', formatSeg),
-      field('Города', cities.el, 'Через запятую или Enter. Понимаем сокращения: СПб, Питер, Мск, Екб. Первый город используется для поиска на hh.ru и Avito.'),
+      field('Формат', formatSeg, 'Если отмечена «Удалённо», показываем и вакансии из других городов — с пометкой.'),
+      field('Тип занятости', empSeg, 'Ничего не отмечено — подходит любой.'),
+      field('Города', cities.el, 'Только эти города. Другие — лишь при удалённой работе. Через запятую или Enter, понимаем СПб, Питер, Мск, Екб. Первый город — регион поиска на hh.ru и Avito.'),
       field('Не показывать, если в тексте есть', stops.el, 'Стоп-слова через запятую: например, «холодные звонки», «1С».'),
       field('Вакансии не старше, дней', f.age)),
     saveBar);
 
-  container.replaceChildren(form);
+  container.replaceChildren(await profilesBar(() => dirty, onSwitched), form);
   return { isDirty: () => dirty };
 }
 

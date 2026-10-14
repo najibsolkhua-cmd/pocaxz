@@ -8,7 +8,7 @@ const lines = (t) => t.split('\n').map((l) => l.replace(/\s+/g, ' ').trim()).fil
 // Для навыков нужны «сырые» строки: в hh-резюме навыки разделены двойными пробелами.
 const rawLines = (t) => t.split('\n').map((l) => l.trim()).filter(Boolean);
 
-const HEADERS = /^(желаемая должность|специализаци|занятость|график работы|формат работы|желательное время|опыт работы|образование|ключевые навыки|навыки|знание языков|дополнительная информация|обо мне|о себе|повышение квалификации|тесты|рекомендации|портфолио|гражданство|контакты|резюме обновлено|experience|education|skills|about me|summary)/i;
+const HEADERS = /^(желаемая должность|специализаци|занятость|тип занятости|график работы|график|формат работы|формат|желательное время|готов к|готовность|переезд|командировк|оформление|опыт работы|образование|ключевые навыки|навыки|знание языков|дополнительная информация|обо мне|о себе|повышение квалификации|тесты|рекомендации|портфолио|гражданство|контакты|резюме обновлено|experience|education|skills|about me|summary)/i;
 const JOB_WORD = /(маркетолог|разработчик|developer|engineer|инженер|аналитик|analyst|менеджер|manager|специалист|дизайнер|designer|тестировщик|руководитель|директор|бухгалтер|юрист|рекрутер|копирайтер|smm|seo|таргетолог|продюсер|логист|администратор|ассистент|программист|lead|head|продавец|консультант|оператор|редактор)/i;
 
 // Строки после заголовка до следующего заголовка. Заголовков может быть несколько.
@@ -41,11 +41,14 @@ function guessPosition(ls) {
   return head ? head.replace(/[,;.]$/, '') : '';
 }
 
+// Строки-поля резюме («Тип занятости: полная», «График: 5/2») — не должности.
+const NOT_TITLE = /:|\d|занятост|график|формат|зарплат|опыт|время в пути|переезд|командиров|гражданств|оформлен|релокац|удал[её]нн|полный день|гибрид/i;
+
 function guessAltTitles(ls, position) {
   const spec = sectionAfter(ls, /^специализаци/i, HEADERS, 10)
     .flatMap((l) => l.replace(/^[—•\-–\s]+/, '').split(/,\s*/))
     .map((l) => l.trim())
-    .filter((l) => l && l.length <= 60 && l.toLowerCase() !== position.toLowerCase());
+    .filter((l) => l && l.length <= 60 && !NOT_TITLE.test(l) && l.toLowerCase() !== position.toLowerCase());
   return [...new Set(spec)].slice(0, 6);
 }
 
@@ -94,12 +97,12 @@ function guessSalary(ls) {
   return s.currency === 'RUB' ? v : 0;
 }
 
-function guessAbout(ls, text) {
+function guessAbout(ls) {
   const about = sectionAfter(ls, /^(обо мне|о себе|about me|summary|профессиональные навыки и качества)/i, HEADERS, 30).join('\n');
   if (about.length >= 60) return about.slice(0, 1500);
-  // Нет раздела «Обо мне» — берём первый содержательный абзац.
-  const para = text.split(/\n{2,}/).map((p) => p.replace(/\s+/g, ' ').trim()).find((p) => p.length >= 150 && !/@|\+7/.test(p));
-  return para ? para.slice(0, 1500) : '';
+  // Нет раздела «Обо мне» — собираем содержательные предложения, без ФИО, контактов и полей резюме.
+  const sentences = ls.filter((l) => l.length >= 60 && !/@|\+7|https?:|проживает|гражданство|родил/i.test(l) && !HEADERS.test(l));
+  return sentences.join(' ').slice(0, 1000);
 }
 
 function guessSkills(_ls, text) {
@@ -124,7 +127,7 @@ export function profileFromResume(text) {
     name: guessName(ls),
     position,
     titleKeywords: guessAltTitles(ls, position),
-    about: guessAbout(ls, text),
+    about: guessAbout(ls),
     grade: guessGrade(text, position),
     minSalary: guessSalary(ls),
     formats: guessFormats(text),

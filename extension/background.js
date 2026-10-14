@@ -36,6 +36,9 @@ chrome.storage.onChanged.addListener((changes, area) => {
 
 let running = false;
 let current = null;
+// «Стоп»: прерываем обход и закрываем текущую вкладку.
+let stopRequested = false;
+let currentHandle = null;
 // Прогресс для главной: какие источники в очереди, какой обходится сейчас.
 let progress = { total: 0, done: 0, current: null, queue: [], finishedAt: null };
 
@@ -72,7 +75,9 @@ async function runQueue(due, settings) {
   try {
     progress = { total: due.length, done: 0, current: null, queue: due.map((s) => ({ id: s.id, platform: s.platform, name: s.name })), finishedAt: null };
     for (let i = 0; i < due.length; i++) {
+      if (stopRequested) break;
       if (i > 0) await sleep(rand(...settings.pauseBetweenSources));
+      if (stopRequested) break;
       current = due[i].name;
       progress.current = progress.queue.shift();
       progress.found = 0;
@@ -85,7 +90,9 @@ async function runQueue(due, settings) {
   } finally {
     running = false;
     current = null;
-    progress = { ...progress, current: null, queue: [], finishedAt: new Date().toISOString() };
+    progress = { ...progress, current: null, queue: [], finishedAt: new Date().toISOString(), stopped: stopRequested };
+    stopRequested = false;
+    currentHandle = null;
     stop();
   }
 }
@@ -188,10 +195,18 @@ function navigate(tabId, url, timeout = 45e3) {
 async function fetchDetails(tabId, platform, list) {
   if (!list.length) return { results: {}, blocked: null };
   if (platform !== 'generic') {
-    return (await callInTab(tabId, 'details', { platform, items: list, delay: DETAIL_DELAY[platform] })) || { results: {}, blocked: null };
+    // Порциями по 3, чтобы «Стоп» срабатывал быстро.
+    const results = {};
+    for (let i = 0; i < list.length && !stopRequested; i += 3) {
+      const r = (await callInTab(tabId, 'details', { platform, items: list.slice(i, i + 3), delay: DETAIL_DELAY[platform] })) || { results: {} };
+      Object.assign(results, r.results);
+      if (r.blocked) return { results, blocked: r.blocked };
+    }
+    return { results, blocked: null };
   }
   const results = {};
   for (const it of list) {
+    if (stopRequested) break;
     try {
       await navigate(tabId, it.url);
       results[it.externalId] = await callInTab(tabId, 'current', { platform, waitMs: 1500 });
@@ -218,6 +233,7 @@ async function runSource(src, settings) {
   let handle;
   try {
     handle = await openHidden(src.url, settings.openIn);
+    currentHandle = handle;
     await waitTabComplete(handle.tabId);
     await sleep(rand(1500, 3000));
     let url = src.url;
@@ -233,7 +249,7 @@ async function runSource(src, settings) {
       for (const it of res.items || []) if (!collected.has(it.externalId) && collected.size < limit) collected.set(it.externalId, it);
       progress.found = collected.size;
       progress.page = pages;
-      if (collected.size >= limit || collected.size === before || !res.nextUrl || pages >= MAX_PAGES) break;
+      if (stopRequested || collected.size >= limit || collected.size === before || !res.nextUrl || pages >= MAX_PAGES) break;
       url = res.nextUrl;
       await sleep(rand(...PAGE_DELAY[src.platform]));
       try { await navigate(handle.tabId, url); } catch (e) { error = String(e?.message || e); break; }
@@ -243,7 +259,7 @@ async function runSource(src, settings) {
     stats = await ingest(items, src.platform, src);
 
     // 2. Подробное описание — только для лучших новых вакансий, чтобы не ждать часами.
-    if (!blocked && DETAIL_CAP[src.platform]) {
+    if (!blocked && !stopRequested && DETAIL_CAP[src.platform]) {
       const want = Math.min(Number(settings.deepCheck) || 20, DETAIL_CAP[src.platform]);
       const cand = await pickForDetails(items, src.platform, settings, want);
       if (cand.length) {
@@ -263,7 +279,7 @@ async function runSource(src, settings) {
     }
 
     // 3. Давно не встречавшиеся вакансии из вашего списка — не ушли ли в архив.
-    if (!blocked && RECHECK_PER_RUN[src.platform]) {
+    if (!blocked && !stopRequested && RECHECK_PER_RUN[src.platform]) {
       const stale = await pickForRecheck(src.platform, new Set(collected.keys()), settings);
       if (stale.length) {
         const d = await fetchDetails(handle.tabId, src.platform, stale);
@@ -281,13 +297,18 @@ async function runSource(src, settings) {
     }
 
     // Сайт компании показывает весь список: если вакансии нет два обхода подряд — её сняли.
-    if (src.platform === 'generic' && !blocked && !error && collected.size && collected.size < limit) {
+    if (src.platform === 'generic' && !blocked && !error && !stopRequested && collected.size && collected.size < limit) {
       archived += await archiveMissing(src, new Set(collected.keys()));
     }
   } catch (e) {
-    error = String(e?.message || e);
+    // Вкладку закрыли по кнопке «Стоп» — это не ошибка.
+    if (!stopRequested) error = String(e?.message || e);
   } finally {
     handle?.close();
+  }
+  // Найденное до остановки сохраняем.
+  if (stopRequested && collected.size && !stats.found) {
+    try { stats = await ingest([...collected.values()], src.platform, src); } catch { /* ignore */ }
   }
 
   const failures = blocked || (error && !collected.size) ? (st.failures || 0) + 1 : 0;
@@ -301,6 +322,9 @@ async function runSource(src, settings) {
   } else if (failures) {
     status = 'failed';
     waitMin = Math.min(24 * 60, src.intervalMin * 2 ** Math.min(failures, 5));
+  } else if (stopRequested) {
+    status = 'stopped';
+    waitMin = src.intervalMin;
   } else if (!collected.size) {
     status = 'empty';
   }
@@ -464,11 +488,12 @@ async function cleanup(settings) {
   const remove = [];
   for (const [k, v] of Object.entries(all)) {
     if (!k.startsWith('v:')) continue;
-    const u = all[`u${k.slice(1)}`];
-    const kept = u && !['new', 'viewed', 'hidden'].includes(u.status);
+    // Не удаляем вакансию, если хоть в одном профиле вы с ней работали.
+    const pids = (all.profiles || [{ id: 'p1' }]).map((x) => x.id);
+    const kept = pids.some((pid) => { const u = all[store.uKeyFor(k, pid)]; return u && !['new', 'viewed', 'hidden'].includes(u.status); });
     const t = Date.parse(v.publishedAt || v.firstSeenAt);
     const archivedLongAgo = v.archived && Date.parse(v.archivedAt || 0) < Date.now() - 2 * 86400e3;
-    if (!kept && (t < limit || archivedLongAgo)) remove.push(k, `u${k.slice(1)}`);
+    if (!kept && (t < limit || archivedLongAgo)) remove.push(k, ...pids.map((pid) => store.uKeyFor(k, pid)));
   }
   if (remove.length) await chrome.storage.local.remove(remove);
 }
@@ -544,6 +569,12 @@ async function inspectUrl(url) {
 
 const handlers = {
   runNow: ({ sourceId }) => startManual(sourceId),
+  async stop() {
+    if (!running) return { running: false };
+    stopRequested = true;
+    currentHandle?.close();
+    return { stopping: true };
+  },
   status: async () => ({ running, current, progress }),
   collectTab: ({ tabId }) => collectFromTab(tabId),
   inspectUrl: ({ url }) => inspectUrl(url),

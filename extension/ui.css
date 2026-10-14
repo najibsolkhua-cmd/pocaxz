@@ -109,7 +109,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .scanning .dot { animation: pulse 1s ease-in-out infinite; background: #fff; }
 .warn .dot { background: #ffb020; }
 @keyframes pulse { 50% { transform: scale(.55); opacity: .5; } }
-.tile-title { font-weight: 700; font-size: 17px; }
+.tile-title { font-weight: 700; font-size: 17px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 
 /* Плитки источников */
 .t-src { align-items: stretch; container-type: size; }
@@ -156,8 +156,9 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .limit .on { background: #fff; color: var(--red); border-color: #fff; }
 .limit input#limitInput:focus { outline: none; border-color: #fff; background: rgba(255, 255, 255, .14); }
 .limit input#limitInput.on { background: #fff; color: var(--red); }
+.find-row { display: flex; gap: 1.6cqw; }
 .find {
-  position: relative; overflow: hidden;
+  position: relative; overflow: hidden; flex: 1; min-width: 0;
   width: 100%; height: 15cqh; border: 0; border-radius: 4cqh;
   background: #fff; color: var(--red); cursor: pointer;
   font: 500 8.4cqh/1 Manrope, sans-serif; letter-spacing: -.01em;
@@ -166,9 +167,14 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .find:hover { transform: scale(1.01); }
 .find:active { transform: scale(.99); }
 .find-fill { position: absolute; inset: 0 auto 0 0; width: 0; background: #ffd9d3; transition: width .6s ease; }
-.find-text { position: relative; }
+.find-text { position: relative; display: block; padding: 0 4cqw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .find.busy { cursor: progress; }
-.find.busy .find-text { font-size: 5.4cqh; }
+.find.busy .find-text { font-size: 5cqh; }
+.stop {
+  flex: none; height: 15cqh; padding: 0 3.4cqw; border-radius: 4cqh; cursor: pointer;
+  border: 2px solid #fff; background: transparent; color: #fff; font: 600 5cqh/1 Manrope, sans-serif;
+}
+.stop:hover { background: #fff; color: var(--red); }
 
 /* Внутренности «информационных» плиток */
 .tile-body { flex: 1; min-height: 0; overflow: hidden; margin-top: 12px; }
@@ -307,6 +313,9 @@ textarea { width: 100%; resize: vertical; }
 .vc-company { color: var(--ink); font-weight: 600; }
 .vc-salary { color: var(--ink); font-weight: 800; }
 .vc-wait { color: var(--warn); font-weight: 700; }
+.vc-remote { color: #0a6fb8; font-weight: 700; background: #e6f2fc; border-radius: 8px; padding: 0 6px; }
+.excl { margin: 4px 0 14px; padding: 10px 14px; border-radius: 14px; background: var(--soft); font-size: 13px; color: var(--muted); }
+.excl b { color: var(--ink); }
 .vc-wait.late { color: #c0392b; }
 .vc-snippet { margin: 6px 0 0; font-size: 13px; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .vc-also { font-size: 13px; color: var(--muted); margin-top: 6px; }
@@ -359,6 +368,9 @@ button.chip:hover { border-color: var(--ink); }
 .grid3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin-top: 10px; }
 
 /* Профиль */
+.profiles-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 0 0 16px; margin-bottom: 4px; border-bottom: 1px solid var(--line); }
+.profiles-bar .field-label { margin-right: 4px; }
+.profile-select { min-width: 220px; font-weight: 700; }
 .pform section { border-bottom: 1px solid var(--line); padding: 18px 0; }
 .pform section:first-of-type { padding-top: 0; }
 .field { display: grid; gap: 6px; margin-bottom: 14px; }
@@ -400,6 +412,10 @@ button.chip:hover { border-color: var(--ink); }
 .savebar.dirty .btn.primary { box-shadow: 0 0 0 4px #ffd9d3; }
 
 /* Настройки и журнал */
+.danger-zone { display: flex; gap: 16px; align-items: center; justify-content: space-between; margin-top: 16px; padding: 14px 16px; border: 1px solid #f3c2bb; border-radius: 16px; background: #fff7f5; }
+.danger-zone p { margin: 4px 0 0; }
+.btn.danger { background: #fff; color: #c0392b; border-color: #e5a59c; flex: none; }
+.btn.danger:hover { background: #c0392b; color: #fff; border-color: #c0392b; }
 .settings .check { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; font-weight: 600; }
 table.log { width: 100%; border-collapse: collapse; font-size: 13px; }
 table.log th, table.log td { text-align: left; padding: 7px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }

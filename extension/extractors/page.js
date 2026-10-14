@@ -364,6 +364,25 @@
     }
   }
 
+  // Сайты, которые подгружают список при прокрутке (бесконечная лента).
+  async function scrollLoad(cfg, countNow) {
+    for (let i = 0; i < (cfg.scrollRounds ?? 12); i++) {
+      if (countNow() >= cfg.limit) return;
+      const before = countNow();
+      window.scrollTo(0, document.body.scrollHeight);
+      const grown = await waitFor(() => countNow() > before, 3500);
+      if (!grown) return;
+      await sleep(rand(500, 1200));
+    }
+  }
+
+  // Если вакансии не распознались — что вообще есть на странице (для подсказки).
+  function diagnose() {
+    const links = [...document.querySelectorAll('a[href]')].filter((a) => !inChrome(a));
+    const sample = links.map((a) => a.href.replace(location.origin, '')).filter((h) => h.length > 1 && !h.startsWith('#')).slice(0, 6);
+    return `на странице ${links.length} ссылок, вакансии не распознаны${sample.length ? ` (например: ${sample.join(', ')})` : ''}. Укажите шаблон ссылки в «Ручной настройке».`;
+  }
+
   function genericNext() {
     const rel = document.querySelector('a[rel="next"]');
     if (rel?.href) return rel.href;
@@ -408,10 +427,12 @@
         if (ld.length) items = ld.map((j) => fromJsonLd(j, location.href));
         else {
           const count = () => genericParse(document, cfg).length;
-          await waitFor(() => count() > 0, 12000);
+          await waitFor(() => count() > 0, 15000);
           await gentleScroll(4);
           await clickMore(cfg, count);
+          await scrollLoad(cfg, count);
           items = genericParse(document, cfg);
+          if (!items.length) error = diagnose();
         }
         nextUrl = genericNext();
       }

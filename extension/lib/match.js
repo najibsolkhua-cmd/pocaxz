@@ -1,24 +1,31 @@
-// Оценка «насколько вакансия подходит профилю». Чистые функции, без chrome.*.
+// Отбор и оценка вакансий по профилю. Чистые функции, без chrome.*.
 //
-// Из чего складывается оценка (0..1):
-//   навыки     — какую долю требований вакансии закрывают ваши навыки;
-//   текст      — похожесть текста вакансии на «должность + чем занимаюсь + резюме»
-//                (TF-IDF, работает и для профессий, которых нет в словаре навыков);
-//   должность  — сколько слов из желаемой должности есть в названии вакансии;
-//   грейд, зарплата, свежесть.
+// 1. Жёсткие фильтры профиля — вакансия, которая их не проходит, не показывается
+//    и не считается «подходящей»:
+//      • должность: желаемая должность или одно из её названий есть там, где вы
+//        выбрали искать (название / компания / описание). Сравниваем по смысловым
+//        словам с учётом падежей и перевода EN↔RU: «Marketing manager» = «менеджер по
+//        маркетингу», а «Главный специалист отдела безопасности» — не «Специалист по
+//        маркетингу»;
+//      • город: только города из профиля; другие — только если работа удалённая;
+//      • тип занятости, формат, стоп-слова, свежесть.
+// 2. Оценка «Подходит мне» (0..1) у прошедших: должность, навыки, похожесть на
+//    резюме и «Чем я занимаюсь», зарплата, грейд, свежесть.
 
-import { GRADES, resolveSkill, extractSkills, salaryInRub } from './parse.js';
-import { cityMatches } from './geo.js';
+import { GRADES, resolveSkill, extractSkills, salaryInRub, parseEmployment } from './parse.js';
+import { canonicalCity, vacancyCities } from './geo.js';
 
 export const DEFAULT_PROFILE = {
   name: '',
-  position: '',           // «Python backend-разработчик»
+  position: '',           // «Маркетолог» или «Product Marketing Manager»
   about: '',              // чем занимаюсь, свободный текст
-  titleKeywords: [],      // доп. варианты названия: «бэкенд», «backend»
+  titleKeywords: [],      // другие названия должности
+  matchIn: { title: true, company: false, description: true }, // где должна встречаться должность
   grade: '',
-  skills: [],             // ['*Python', 'Django'] — «*» = основной стек
+  skills: [],             // ['*SMM', 'Яндекс Директ'] — «*» = основной навык
   minSalary: 0,           // ₽ в месяц
   formats: ['remote', 'hybrid', 'office'],
+  employment: [],         // пусто = любой тип занятости
   cities: [],
   stopWords: [],
   maxAgeDays: 30,
@@ -34,9 +41,22 @@ const STOP = new Set(`
 the a an and or of to in on for with at by from is are be as we you your our will this that it work team experience years job role skills requirements
 `.split(/\s+/).filter(Boolean));
 
-// Грубый стеммер: для русского первые 6 букв дают приемлемое качество.
-const SYN = { develo: 'разраб', progra: 'разраб', engine: 'инжене', analys: 'аналит', analyt: 'аналит', manage: 'менедж', design: 'дизайн', tester: 'тестир', testin: 'тестир', qa: 'тестир', market: 'маркет', accoun: 'бухгал', recrui: 'рекрут', backen: 'бэкенд', бекенд: 'бэкенд', fronte: 'фронте', фронт: 'фронте' };
+// Грубый стеммер: первые 6 букв + словарь, сводящий английские и русские формы
+// к одному корню, — так «Marketing Manager» совпадает с «менеджер по маркетингу».
+const SYN = {
+  develo: 'разраб', progra: 'разраб', програ: 'разраб', engine: 'инжене', analys: 'аналит', analyt: 'аналит',
+  manage: 'менедж', design: 'дизайн', дизайн: 'дизайн', tester: 'тестир', testin: 'тестир', qa: 'тестир',
+  market: 'маркет', маркет: 'маркет', recrui: 'рекрут', backen: 'бэкенд', бекенд: 'бэкенд', fronte: 'фронте', фронт: 'фронте',
+  produc: 'продук', продук: 'продук', brand: 'бренд', sales: 'продаж', seller: 'продаж', продав: 'продаж',
+  conten: 'контен', perfor: 'перфор', перфом: 'перфор', digita: 'диджит', диджит: 'диджит', target: 'таргет',
+  head: 'руково', lead: 'руково', chief: 'руково', direct: 'директ', accoun: 'аккаун', аккаун: 'аккаун',
+  specia: 'специа', expert: 'экспер', assist: 'ассист', copywr: 'копира', copyri: 'копира', editor: 'редакт',
+  financ: 'финанс', lawyer: 'юрист', legal: 'юрист', logist: 'логист', operat: 'операт', consul: 'консул',
+  servic: 'сервис', suppor: 'поддер', bookke: 'бухгал',
+};
 function stem(w) {
+  // «Маркетплейс» — другая профессия, чем «маркетолог», хотя корень похож.
+  if (w.startsWith('маркетплейс') || w.startsWith('marketplace')) return 'mplace';
   const s = w.length > 6 ? w.slice(0, 6) : w;
   return SYN[s] || s;
 }
@@ -50,6 +70,14 @@ export function tokens(text) {
   }
   return out;
 }
+
+// Слова, которые есть в названиях почти всех профессий и сами по себе ничего не значат.
+export const GENERIC = new Set(tokens(
+  'менеджер специалист руководитель ведущий главный старший младший помощник ассистент сотрудник эксперт отдела отдел '
+  + 'направления группы управления департамента начальник заместитель стажер стажёр junior middle senior lead head chief '
+  + 'manager specialist assistant expert intern старший ведущий главный',
+));
+const GRADE_WORDS = /^(junior|middle|senior|джун|мидл|сеньор|синьор|младши|старши|ведущи|главны|стажер|intern|trainee)/u;
 
 function tf(toks, weight = 1, into = new Map()) {
   for (const t of toks) into.set(t, (into.get(t) || 0) + weight);
@@ -78,9 +106,63 @@ function cosine(a, b) {
 
 const vacText = (v) => `${v.title} ${v.title} ${v.title}\n${v.description || v.snippet || ''}`;
 
+// Токены вакансии считаются один раз: при тысячах вакансий это главный расход времени.
+const tokCache = new Map();
+function vacTokens(v) {
+  const key = v.key ? `${v.key}|${v.lastSeenAt}|${v.enriched ? 1 : 0}` : null;
+  if (key && tokCache.has(key)) return tokCache.get(key);
+  const t = tokens(vacText(v));
+  if (key) {
+    if (tokCache.size > 20000) tokCache.clear();
+    tokCache.set(key, t);
+  }
+  return t;
+}
+
+// ---------- Должность ----------
+
+// Фраза должности: смысловые слова (core) обязательны; если смысловых нет
+// («Менеджер»), обязательны все слова.
+export function phrase(text) {
+  const all = [...new Set(tokens(text))].filter((t) => !GRADE_WORDS.test(t));
+  const core = all.filter((t) => !GENERIC.has(t));
+  return { label: text, need: core.length ? core : all };
+}
+
+// «Product Marketing Manager (PMM)» → два варианта: «Product Marketing Manager» и «PMM».
+// Так же для «А / Б» и «А, Б».
+export function phrasesOf(text) {
+  return (text || '').split(/[()/|,;]+/).map((x) => x.trim()).filter((x) => x.length >= 2)
+    .map(phrase).filter((p) => p.need.length);
+}
+
+const hasAll = (need, set) => need.length > 0 && need.every((t) => set.has(t));
+
+// Где в вакансии встречается одна из ваших должностей.
+export function findPosition(v, phrases, matchIn) {
+  if (!phrases.length) return { where: 'any' };
+  const title = new Set(tokens(v.title));
+  for (const p of phrases) if (hasAll(p.need, title)) return { where: 'title', phrase: p.label };
+  if (matchIn.company) {
+    const company = new Set(tokens(v.company));
+    for (const p of phrases) if (hasAll(p.need, company)) return { where: 'company', phrase: p.label };
+  }
+  if (matchIn.description) {
+    const desc = tokens(v.description || v.snippet || '');
+    // Должность должна быть в начале описания (там пишут «Ищем маркетолога…»)
+    // или встречаться хотя бы дважды — одно случайное упоминание не считается.
+    const head = new Set(desc.slice(0, 80));
+    const counts = tf(desc);
+    for (const p of phrases) {
+      if (hasAll(p.need, head) || (p.need.length && p.need.every((t) => (counts.get(t) || 0) >= 2))) return { where: 'description', phrase: p.label };
+    }
+  }
+  return { where: null };
+}
+
 // ---------- Профиль ----------
 
-// Разбирает список навыков профиля. «*Python» — основной стек.
+// Разбирает список навыков профиля. «*SMM» — основной навык.
 export function profileSkills(profile) {
   const out = [];
   for (const raw of profile.skills || []) {
@@ -91,16 +173,14 @@ export function profileSkills(profile) {
   return out;
 }
 
-const GRADE_WORDS = /^(junior|middle|senior|lead|джун|мидл|сеньор|синьор|младши|старши|ведущи|главны|стажер|intern|trainee)/u;
-
-// Контекст считается один раз на набор вакансий: IDF по корпусу и вектор профиля.
+// Контекст считается один раз на набор вакансий: IDF по корпусу, вектор профиля, фразы должности.
 export function makeContext(profile, vacancies = [], resumeText = '') {
   const df = new Map();
-  for (const v of vacancies) for (const t of new Set(tokens(vacText(v)))) df.set(t, (df.get(t) || 0) + 1);
+  for (const v of vacancies) for (const t of new Set(vacTokens(v))) df.set(t, (df.get(t) || 0) + 1);
   const n = Math.max(vacancies.length, 1);
   const idf = new Map();
   for (const [t, d] of df) idf.set(t, Math.log(1 + n / d));
-  idf.default = Math.log(1 + n); // слово, которого нет ни в одной вакансии
+  idf.default = Math.log(1 + n);
 
   const ps = profileSkills(profile);
   const counts = new Map();
@@ -114,25 +194,48 @@ export function makeContext(profile, vacancies = [], resumeText = '') {
     tf(tokens(ex.text).slice(0, 800), 1, counts);
   }
 
-  const clean = (t) => [...new Set(tokens(t))].filter((x) => !GRADE_WORDS.test(x));
-  const posTokens = clean(profile.position);
-  // Другие названия должности и названия примеров — тоже «нужная должность».
-  const altTitles = [...(profile.titleKeywords || []), ...(profile.examples || []).map((e) => e.title)]
-    .map(clean).filter((t) => t.length);
-  return { ps, idf, profileVec: counts.size ? vectorize(counts, idf) : null, posTokens, altTitles };
+  const phrases = [profile.position, ...(profile.titleKeywords || []), ...(profile.examples || []).map((e) => e.title)]
+    .flatMap(phrasesOf);
+  const matchIn = { ...DEFAULT_PROFILE.matchIn, ...(profile.matchIn || {}) };
+  const cities = (profile.cities || []).map(canonicalCity).filter(Boolean);
+  return { ps, idf, profileVec: counts.size ? vectorize(counts, idf) : null, phrases, matchIn, cities };
 }
 
-// ---------- Оценка ----------
+// ---------- Отбор и оценка ----------
+
+const out = (reason, extra = {}) => ({ score: 0, excluded: reason, matched: [], missing: [], ...extra });
 
 export function scoreVacancy(v, profile, now = Date.now(), ctx = makeContext(profile, [v])) {
-  const text = `${v.title}\n${v.company}\n${v.description || v.snippet || ''}`.toLowerCase();
+  const fullText = `${v.title}\n${v.company}\n${v.description || v.snippet || ''}`;
+  const lower = fullText.toLowerCase();
 
-  const stop = (profile.stopWords || []).map((s) => s.trim().toLowerCase()).filter(Boolean).find((s) => text.includes(s));
-  if (stop) return { score: 0, stopped: stop, matched: [], missing: [] };
+  // --- жёсткие фильтры
+  const stop = (profile.stopWords || []).map((s) => s.trim().toLowerCase()).filter(Boolean).find((s) => lower.includes(s));
+  if (stop) return out('стоп-слово', { stopped: stop });
 
   const date = Date.parse(v.publishedAt || v.firstSeenAt) || now;
   const ageDays = Math.max(0, (now - date) / 86400e3);
-  if (profile.maxAgeDays && ageDays > profile.maxAgeDays) return { score: 0, tooOld: true, matched: [], missing: [] };
+  if (profile.maxAgeDays && ageDays > profile.maxAgeDays) return out('старая', { tooOld: true });
+
+  const pos = findPosition(v, ctx.phrases, ctx.matchIn);
+  if (!pos.where) return out('другая должность');
+
+  const remote = (v.formats || []).includes('remote');
+  const wantFormats = new Set(profile.formats || []);
+  const vCities = vacancyCities(v);
+  let otherCity = null;
+  if (ctx.cities.length && vCities.length && !vCities.some((c) => ctx.cities.includes(c))) {
+    // Другой город подходит, только если работа удалённая и удалёнка вам подходит.
+    if (!remote || (wantFormats.size && !wantFormats.has('remote'))) return out('другой город', { cities: vCities });
+    otherCity = vCities[0];
+  }
+  if (v.formats?.length && wantFormats.size && !v.formats.some((f) => wantFormats.has(f))) return out('другой формат');
+
+  const wantEmp = new Set(profile.employment || []);
+  if (wantEmp.size) {
+    const emp = parseEmployment(fullText);
+    if (emp.length && !emp.some((e) => wantEmp.has(e))) return out('другой тип занятости');
+  }
 
   // --- навыки
   const { ps } = ctx;
@@ -158,28 +261,22 @@ export function scoreVacancy(v, profile, now = Date.now(), ctx = makeContext(pro
     total += 0.5;
     if (mine.has(s)) { got += 0.5; matched.push(s); }
   }
-  let skillScore = null; // null — сравнивать нечего, вес уходит тексту
+  let skillScore = null;
   if (total && mine.size) {
     skillScore = got / total;
     const primaryHit = [...primary].some((s) => required.has(s) || optional.has(s));
-    if (primary.size && !primaryHit) skillScore *= 0.5;
+    if (primary.size && !primaryHit) skillScore *= 0.6;
   }
 
-  // --- похожесть текста
+  // --- похожесть на резюме и «Чем я занимаюсь»
   let textScore = null;
   if (ctx.profileVec) {
-    const vv = vectorize(tf(tokens(vacText(v))), ctx.idf);
+    const vv = vectorize(tf(vacTokens(v)), ctx.idf);
     textScore = Math.min(1, cosine(ctx.profileVec, vv) / 0.3);
   }
 
-  // --- должность в названии
-  // Доля слов желаемой должности (или любого из её синонимов) в названии вакансии.
-  let titleScore = 0.5;
-  const titleToks = new Set(tokens(v.title));
-  const variants = [ctx.posTokens, ...(ctx.altTitles || [])].filter((t) => t.length);
-  if (variants.length) {
-    titleScore = Math.max(...variants.map((vt) => vt.filter((t) => titleToks.has(t)).length / vt.length));
-  }
+  // --- должность: в названии — лучше всего
+  const titleScore = { title: 1, any: 0.7, company: 0.6, description: 0.5 }[pos.where];
 
   // --- грейд
   let gradeScore = 0.7;
@@ -199,31 +296,34 @@ export function scoreVacancy(v, profile, now = Date.now(), ctx = makeContext(pro
 
   const fresh = Math.exp(-ageDays / 10);
 
-  // Веса; если какой-то сигнал недоступен, его вес переходит к тексту/должности.
-  const w = { skills: 0.35, text: 0.2, title: 0.2, grade: 0.08, salary: 0.1, fresh: 0.07 };
+  const w = { title: 0.3, skills: 0.28, text: 0.17, grade: 0.07, salary: 0.1, fresh: 0.08 };
   if (skillScore == null) { w.text += w.skills; w.skills = 0; skillScore = 0; }
   if (textScore == null) { w.title += w.text; w.text = 0; textScore = 0; }
-  let score = w.skills * skillScore + w.text * textScore + w.title * titleScore + w.grade * gradeScore + w.salary * salaryScore + w.fresh * fresh;
-
-  // Формат/город: штраф, а не фильтр — в тексте формат часто не указан.
-  const wantFormats = new Set(profile.formats || []);
-  if (v.formats?.length && wantFormats.size && !v.formats.some((f) => wantFormats.has(f))) score *= 0.5;
-  const cities = (profile.cities || []).filter(Boolean);
-  const officeOnly = v.formats?.length && !v.formats.includes('remote');
-  if (officeOnly && cities.length && v.location && !cities.some((c) => cityMatches(c, v.location))) score *= 0.5;
+  const score = w.title * titleScore + w.skills * skillScore + w.text * textScore + w.grade * gradeScore + w.salary * salaryScore + w.fresh * fresh;
 
   return {
     score: Math.round(score * 100) / 100,
     matched,
     missing,
+    where: pos.where,
+    phrase: pos.phrase,
+    otherCity,
+    cities: vCities,
     parts: { skills: skillScore, text: textScore, title: titleScore, grade: gradeScore, salary: salaryScore, fresh },
     skillsTotal: Math.round(total * 2) / 2,
     weights: w,
   };
 }
 
-// Удобная обёртка: оценки для набора вакансий.
+// Оценки для набора вакансий.
 export function scoreAll(vacancies, profile, resumeText = '', now = Date.now()) {
   const ctx = makeContext(profile, vacancies, resumeText);
   return vacancies.map((v) => ({ v, s: scoreVacancy(v, profile, now, ctx) }));
+}
+
+// Сколько вакансий отсеяли фильтры профиля и почему — показываем, чтобы было понятно.
+export function exclusionStats(scored) {
+  const by = {};
+  for (const { s } of scored) if (s.excluded) by[s.excluded] = (by[s.excluded] || 0) + 1;
+  return by;
 }

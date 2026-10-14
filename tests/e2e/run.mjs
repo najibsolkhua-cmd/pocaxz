@@ -124,7 +124,8 @@ try {
   await page.close();
   page = await context.newPage();
   page.on('pageerror', (e) => pageErrors.push(e.message));
-  page.on('dialog', (d) => d.accept());
+  const acceptAll = (dlg) => dlg.accept();
+  page.on('dialog', acceptAll);
   if (process.env.DEBUG_E2E) page.on('console', (m) => console.log('  [console]', m.type(), m.text()));
   await page.goto(`${dash}#profile`);
   const d = page.locator('#drawerBody');
@@ -170,6 +171,14 @@ try {
     await stop.press('Enter');
   });
 
+  await step('«Искать должность только»: название и описание по умолчанию, компания — по выбору', async () => {
+    const seg = d.locator('.field', { hasText: 'Искать должность только' }).locator('.seg button');
+    assert.deepEqual(await seg.evaluateAll((bs) => bs.map((b) => b.classList.contains('on'))), [true, false, true]);
+    await seg.nth(1).click();
+    await seg.nth(1).click();
+    assert.ok(await d.locator('.field', { hasText: 'Тип занятости' }).count());
+  });
+
   await step('пример подходящей вакансии по ссылке', async () => {
     await d.locator('.field', { hasText: 'Примеры подходящих' }).locator('input').fill(`${base}/vacancy/101`);
     await d.locator('.field', { hasText: 'Примеры подходящих' }).locator('button', { hasText: 'Добавить' }).click();
@@ -186,6 +195,7 @@ try {
     assert.ok(all.profile.stopWords.includes('1С'));
     assert.equal(all.profile.examples.length, 1);
     assert.ok(!all.profile.formats.includes('office'));
+    assert.deepEqual(all.profile.matchIn, { title: true, company: false, description: true });
     const hh = all.sources.find((x) => x.auto === 'hh');
     assert.ok(hh, 'нет автопоиска hh');
     assert.ok(decodeURIComponent(hh.url).includes('Python backend-разработчик OR Python-разработчик') || decodeURIComponent(hh.url).includes('"Python backend-разработчик" OR Python-разработчик'), decodeURIComponent(hh.url));
@@ -227,12 +237,12 @@ try {
     });
   }, base);
 
-  await step('лимит 10: источник с 5 вакансиями на двух страницах собирается целиком, но не больше лимита', async () => {
+  await step('лимит 10: источник с 6 вакансиями на двух страницах собирается целиком, но не больше лимита', async () => {
     await page.evaluate(() => chrome.runtime.sendMessage({ type: 'runNow', sourceId: 'hh' }));
     await waitIdle(page);
     const st = (await storage(page))['srcstate:hh'];
-    assert.equal(st.lastTotal, 5, 'всего на сайте из заголовка');
-    assert.equal(st.lastFound, 5, 'обе страницы выдачи');
+    assert.equal(st.lastTotal, 6, 'всего на сайте из заголовка');
+    assert.equal(st.lastFound, 6, 'обе страницы выдачи');
     assert.equal(st.lastPages, 3, 'третья страница пустая — стоп');
     assert.ok(hits.some((h) => h.includes('/hh/search?page=1')));
   });
@@ -260,6 +270,22 @@ try {
     assert.ok(v('hh:104')?.archived, 'hh:104 «в архиве» должна быть помечена');
     assert.ok(v('hh:105'));
     assert.equal(v('hh:201')?.title, 'Python Backend Developer (FastAPI)');
+  });
+
+  await step('фильтры профиля: чужой город без удалёнки и чужая должность отсеяны, удалёнка из другого города — с пометкой', async () => {
+    const r = await page.evaluate(async () => {
+      const { scoreAll } = await import('./lib/match.js');
+      const store = await import('./lib/store.js');
+      const a = await chrome.storage.local.get(null);
+      const rows = scoreAll(store.vacanciesFrom(a), store.sanitizeProfile(a.profile), a.resume?.text || '');
+      return Object.fromEntries(rows.map(({ v: x, s }) => [x.key, { ex: s.excluded || null, other: s.otherCity || null }]));
+    });
+    assert.equal(r['v:hh:106'].ex, 'другой город', 'офис в Екатеринбурге');
+    assert.equal(r['v:hh:105'].ex, null);
+    assert.equal(r['v:hh:105'].other, 'Новосибирск');
+    assert.equal(r['v:hh:102'].ex, 'другая должность', 'Java при профиле Python');
+    assert.equal(r['v:avito:3007654321'].ex, 'другая должность', 'курьер');
+    assert.equal(r['v:telegram:testjobs/5'].ex, 'другая должность', 'QA');
   });
 
   await step('Avito: две страницы, «на сайте», описание; Telegram; сайт компании', async () => {
@@ -306,6 +332,10 @@ try {
     const titles = await page.locator('#drawerBody .vc h3 a').allTextContents();
     assert.ok(!titles.some((t) => /1С/.test(t)), 'стоп-слово не сработало');
     assert.ok(!titles.includes('Python-разработчик (Django)'), 'архивная вакансия видна');
+    assert.ok(!titles.includes('Python-разработчик в офис'), 'офис в другом городе виден');
+    assert.ok(!titles.includes('Senior Java Developer'), 'чужая должность видна');
+    assert.match(await page.locator('#drawerBody .vc', { hasText: 'Backend Python Developer' }).first().textContent(), /Удалёнка · Новосибирск/);
+    assert.match(await page.locator('#drawerBody .excl').textContent(), /Отсеяно по вашему профилю: \d+ .*другая должность/);
   });
 
   await step('источники: короткие имена, ссылка не вылезает, удаление работает', async () => {
@@ -366,6 +396,56 @@ try {
     assert.equal(hits.length, n);
   });
 
+  await step('кнопка «Стоп» останавливает поиск, найденное сохраняется', async () => {
+    await page.evaluate(async () => {
+      const { settings } = await chrome.storage.local.get('settings');
+      await chrome.storage.local.set({ settings: { ...settings, scanLimit: 1000 } });
+    });
+    await page.waitForTimeout(600);
+    await page.evaluate(() => chrome.runtime.sendMessage({ type: 'runNow' }));
+    await until(() => page.locator('#stopBtn').isVisible(), 8000, 'кнопка «Стоп» появилась');
+    const text = await page.locator('#findText').textContent();
+    const oneLine = await page.locator('#findText').evaluate((el) => el.offsetHeight < parseFloat(getComputedStyle(el).fontSize) * 1.8 && getComputedStyle(el).whiteSpace === 'nowrap');
+    assert.ok(oneLine, `текст прогресса в одну строку: ${text}`);
+    await page.locator('#stopBtn').click();
+    await waitIdle(page, 30000);
+    await until(() => page.locator('#stopBtn').isHidden(), 5000, 'кнопка «Стоп» скрылась');
+    const st = await storage(page);
+    assert.ok(Object.keys(st).some((k) => k.startsWith('srcstate:') && st[k].lastStatus === 'stopped'), 'источник помечен «остановлено»');
+    await page.evaluate(async () => {
+      const { settings } = await chrome.storage.local.get('settings');
+      await chrome.storage.local.set({ settings: { ...settings, scanLimit: 100 } });
+    });
+  });
+
+  await step('несколько профилей: новый — чистый, источники общие, статусы у каждого свои', async () => {
+    const before = await storage(page);
+    const srcCount = before.sources.length;
+    await page.evaluate(() => { location.hash = 'profile'; });
+    await page.waitForSelector('.drawer.open .profiles-bar');
+    page.off('dialog', acceptAll);
+    page.once('dialog', (dlg) => dlg.accept('Аналитик'));
+    await page.locator('.profiles-bar button', { hasText: 'Новый профиль' }).click();
+    await until(async () => (await storage(page)).profiles?.length === 2, 5000, 'второй профиль');
+    page.on('dialog', acceptAll);
+    const st = await storage(page);
+    assert.equal(st.sources.length, srcCount, 'источники остались');
+    assert.ok(!st.resume, 'резюме пустое');
+    assert.equal(st.profile.position || '', '');
+    await page.waitForSelector('.profiles-bar select');
+    assert.equal(await d.locator('.field', { hasText: 'Желаемая должность' }).locator('input').inputValue(), '');
+    await page.evaluate(() => { location.hash = ''; });
+    await until(async () => (await page.locator('#appliedTile .mini-title').count()) === 0, 5000, 'в новом профиле нет откликов');
+    // Обратно в первый профиль — отклик на месте.
+    await page.evaluate(() => { location.hash = 'profile'; });
+    await page.waitForSelector('.drawer.open .profiles-bar select');
+    await page.locator('.profiles-bar select').selectOption('p1');
+    await until(async () => (await storage(page)).activeProfile === 'p1', 5000, 'переключение в p1');
+    await page.evaluate(() => { location.hash = ''; });
+    await until(async () => (await page.locator('#appliedTile .mini-title').count()) === 1, 5000, 'отклик первого профиля вернулся');
+    assert.equal((await storage(page)).profile.name, 'Иван');
+  });
+
   await step('сбор с открытой вкладки (кнопка в меню расширения)', async () => {
     const tab = await context.newPage();
     await tab.goto(`${base}/careers`);
@@ -376,6 +456,35 @@ try {
     assert.ok(r.found >= 1, JSON.stringify(r));
     await tab.close();
     await page.bringToFront();
+  });
+
+  const shotsEarly = process.env.SCREENSHOT_DIR;
+  if (shotsEarly) {
+    fs.mkdirSync(shotsEarly, { recursive: true });
+    await page.evaluate(() => { location.hash = 'hh'; });
+    await page.waitForSelector('.drawer.open .vc');
+    await page.waitForTimeout(600);
+    await page.screenshot({ path: path.join(shotsEarly, 'drawer-hh.png') });
+    await page.evaluate(() => { location.hash = ''; });
+    await page.waitForTimeout(600);
+    await page.screenshot({ path: path.join(shotsEarly, 'home.png') });
+  }
+
+  await step('сброс статистики — только после двух подтверждений', async () => {
+    await page.evaluate(() => { location.hash = 'search'; });
+    await page.waitForSelector('.drawer.open .danger-zone');
+    let asked = 0;
+    const onDialog = (dlg) => { asked++; dlg.accept(); };
+    page.off('dialog', acceptAll);
+    page.on('dialog', onDialog);
+    await page.locator('.danger-zone button').click();
+    await until(async () => !Object.keys(await storage(page)).some((k) => k.startsWith('v:')), 5000, 'вакансии удалены');
+    page.off('dialog', onDialog);
+    page.on('dialog', acceptAll);
+    assert.equal(asked, 2, 'два подтверждения');
+    const st = await storage(page);
+    assert.ok(st.sources.length && st.profiles.length === 2 && st.profile.name === 'Иван', 'источники и профили на месте');
+    assert.ok(!st.runs && !Object.keys(st).some((k) => k.startsWith('u:') || k.startsWith('srcstate:')));
   });
 
   await step('на страницах нет ошибок JavaScript и мусорного текста', async () => {
@@ -398,13 +507,10 @@ try {
       await page.waitForTimeout(600);
       await page.screenshot({ path: path.join(shots, file) });
     };
-    await snap('', 'home.png');
-    await snap('hh', 'drawer-hh.png', '.drawer.open .vc');
     await snap('profile', 'drawer-profile.png', '.drawer.open .pform');
     await page.evaluate(() => { document.querySelector('#drawerBody').scrollTop = 900; });
     await page.waitForTimeout(300);
     await page.screenshot({ path: path.join(shots, 'drawer-profile-2.png') });
-    await snap('', 'home.png');
     await page.setViewportSize({ width: 420, height: 900 });
     await page.waitForTimeout(500);
     await page.screenshot({ path: path.join(shots, 'home-mobile.png'), fullPage: true });

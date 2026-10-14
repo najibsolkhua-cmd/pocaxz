@@ -33,7 +33,7 @@ export function vacancyCard(v, s) {
       h('div', { class: 'vc-meta' },
         v.company ? h('span', { class: 'vc-company' }, v.company) : null,
         salary ? h('span', { class: 'vc-salary' }, salary) : null,
-        v.location ? h('span', {}, v.location) : null,
+        s.otherCity ? h('span', { class: 'vc-remote', title: 'Город не из вашего профиля, но работа удалённая' }, `Удалёнка · ${s.otherCity}`) : v.location ? h('span', {}, v.location) : null,
         v.grades?.length ? h('span', {}, v.grades.map((g) => GRADE_LABEL[g]).join('/')) : null,
         v.formats?.length ? h('span', {}, v.formats.map((f) => FORMAT_LABEL[f]).join(', ')) : null,
         h('span', { class: 'vc-src' }, `${store.PLATFORM_NAMES[v.platform]} · ${ago(v.publishedAt || v.firstSeenAt)}`),
@@ -55,12 +55,12 @@ export function vacancyCard(v, s) {
 
 // Короткое объяснение оценки прямо в карточке.
 function whyLine(s) {
-  if (s.stopped) return `Стоп-слово «${s.stopped}»`;
+  if (s.excluded) return `Не подходит по профилю: ${s.excluded}${s.stopped ? ` «${s.stopped}»` : ''}`;
   if (!s.parts) return '';
   const p = s.parts;
   const w = s.weights || {};
   const out = [];
-  out.push(p.title >= 0.99 ? 'должность ✓' : p.title > 0 ? `должность ${Math.round(p.title * 100)}%` : 'другая должность');
+  out.push({ title: 'должность в названии ✓', description: 'должность в описании', company: 'должность в компании', any: 'должность не задана' }[s.where] || 'должность');
   if (w.skills) out.push(`навыки ${s.matched.length} из ${Math.ceil(s.skillsTotal || 0)}`);
   if (w.text) out.push(`похоже на резюме и опыт ${Math.round(p.text * 100)}%`);
   if (p.salary === 1) out.push('зарплата ✓');
@@ -71,7 +71,7 @@ function whyLine(s) {
 }
 
 function scoreTitle(s) {
-  if (!s.parts) return s.stopped ? `Стоп-слово: ${s.stopped}` : '';
+  if (!s.parts) return s.excluded ? `Не подходит по фильтрам профиля: ${s.excluded}` : '';
   const p = s.parts;
   const pc = (x) => `${Math.round(x * 100)}%`;
   return `Навыки ${pc(p.skills)} · Похожесть текста ${pc(p.text)} · Должность ${pc(p.title)} · Грейд ${pc(p.grade)} · Зарплата ${pc(p.salary)} · Свежесть ${pc(p.fresh)}`;

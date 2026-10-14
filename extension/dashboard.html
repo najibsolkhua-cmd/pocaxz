@@ -60,10 +60,13 @@
           <button type="button" data-limit="1000">1000</button>
           <input id="limitInput" type="number" min="1" max="5000" step="1" placeholder="своё" aria-label="Своё число вакансий">
         </div>
-        <button class="find" id="findBtn" type="button">
-          <span class="find-fill" id="findFill"></span>
-          <span class="find-text" id="findText">/ Найти работу</span>
-        </button>
+        <div class="find-row">
+          <button class="find" id="findBtn" type="button">
+            <span class="find-fill" id="findFill"></span>
+            <span class="find-text" id="findText">/ Найти работу</span>
+          </button>
+          <button class="stop" id="stopBtn" type="button" hidden title="Остановить поиск — найденное сохранится">■ Стоп</button>
+        </div>
       </div>
     </section>
 
