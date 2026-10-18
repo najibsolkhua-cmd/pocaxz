@@ -4,11 +4,12 @@
 import * as store from './lib/store.js';
 import { DEFAULT_PROFILE, scoreAll, profileSkills, exclusionStats } from './lib/match.js';
 import { $, h, logo, fmtTime, daysSince, plural, download } from './ui/dom.js';
-import { createVacancyList, setCardContext } from './ui/vacancies.js';
-import { DEFAULT_TEMPLATES } from './lib/letters.js';
+import { createVacancyList, setCardContext, pasteKeys } from './ui/vacancies.js';
+import { DEFAULT_TEMPLATES, normalizeLetters } from './lib/letters.js';
 import { remindersFor } from './lib/reminders.js';
 import { renderProfile } from './ui/profile.js';
 import { sourceRows, addSourceForm } from './ui/sources.js';
+import { scanHelpGuide } from './ui/help.js';
 import { makeZip } from './lib/zip.js';
 import { createAdSlot } from './ui/ads.js';
 import { supportLink } from './config.js';
@@ -38,7 +39,7 @@ async function loadState() {
   state.sources = all.sources || [];
   state.resume = all.resume || null;
   state.scored = scoreAll(store.vacanciesFrom(all), state.profile, state.resume?.text || '');
-  state.letters = { templates: all.letters?.templates?.length ? all.letters.templates : DEFAULT_TEMPLATES, defaultId: all.letters?.defaultId || 'short', contacts: all.letters?.contacts || '' };
+  state.letters = normalizeLetters(all.letters);
   setCardContext({ profile: state.profile, letters: state.letters });
 }
 
@@ -378,6 +379,8 @@ function buildListDrawer(body, { funnel = false, reminders = false, ...opts }) {
     if (remBox) {
       // Что сделать дальше — по всем откликам сразу.
       const all = state.scored.flatMap(({ v }) => remindersFor(v).map((r) => ({ r, v })));
+      // Нечего напоминать — жёлтого блока нет вовсе.
+      remBox.hidden = !all.length;
       remBox.replaceChildren(...(all.length ? [h('h3', {}, 'Следующие шаги'), h('ul', {}, all.map(({ r, v }) => h('li', {},
         `⏰ ${r.text}: `, h('a', { href: v.url, target: '_blank', rel: 'noopener' }, v.title), v.company ? ` — ${v.company}` : '')))] : []));
     }
@@ -519,6 +522,7 @@ function buildSearchDrawer(body) {
   body.replaceChildren(
     h('section', { class: 'dsec' }, h('h3', {}, 'Как искать'), settingsForm),
     h('section', { class: 'dsec' }, h('h3', {}, 'Все источники'), srcBox),
+    scanHelpGuide(),
     lettersSection(),
     cloudSection(),
     telegramSection(),
@@ -607,14 +611,26 @@ function lettersSection() {
   const name = h('input', { placeholder: 'Название шаблона' });
   const text = h('textarea', { rows: 12, class: 'letter-text' });
   const def = h('input', { type: 'checkbox' });
-  const contacts = h('textarea', { rows: 2, placeholder: 'Телефон, Telegram, почта — подставятся в {контакты}' }, L.contacts);
+  const autoNote = h('p', { class: 'note-ok' },
+    'Этот шаблон не нужно заполнять: для каждой вакансии письмо собирается заново — из её названия и компании, навыков, которые совпали с описанием, вашей должности и грейда, самых близких к вакансии предложений из «Чем я занимаюсь», формата работы и города. Чем подробнее профиль, тем точнее письмо. Хотите свой текст — нажмите «+ Шаблон».');
+  const editBox = h('div', { class: 'tpl-edit' }, h('div', { class: 'field' }, h('span', { class: 'field-label' }, 'Название'), name), text);
+  const contacts = h('textarea', { rows: 2, placeholder: 'Телефон, Telegram, почта, ссылка на резюме — подставятся в подпись' }, L.contacts);
+  const gender = h('select', {},
+    [['', 'рад(а), готов(а) — как есть'], ['m', 'рад, готов — от мужчины'], ['f', 'рада, готова — от женщины']].map(([k, label]) => h('option', { value: k, selected: k === L.gender }, label)));
   const draw = () => {
     pick.replaceChildren(...L.templates.map((t) => h('option', { value: t.id, selected: t.id === cur.id }, `${t.name}${t.id === L.defaultId ? ' (по умолчанию)' : ''}`)));
     name.value = cur.name;
     text.value = cur.text;
     def.checked = cur.id === L.defaultId;
+    autoNote.hidden = !cur.auto;
+    editBox.hidden = Boolean(cur.auto);
   };
-  const pull = () => { cur.name = name.value.trim() || 'Без названия'; cur.text = text.value; if (def.checked) L.defaultId = cur.id; L.contacts = contacts.value; };
+  const pull = () => {
+    if (!cur.auto) { cur.name = name.value.trim() || 'Без названия'; cur.text = text.value; }
+    if (def.checked) L.defaultId = cur.id;
+    L.contacts = contacts.value;
+    L.gender = gender.value;
+  };
   pick.addEventListener('change', () => { pull(); cur = L.templates.find((t) => t.id === pick.value); draw(); });
   draw();
   const save = async () => {
@@ -624,23 +640,43 @@ function lettersSection() {
     setTimeout(() => { saved.textContent = ''; }, 2500);
     draw();
   };
+  const ph = (code, what) => h('li', {}, h('code', {}, code), ` — ${what}`);
   return h('section', { class: 'dsec' }, h('h3', {}, 'Сопроводительные письма'),
-    h('p', { class: 'muted small' }, 'Кнопка «Откликнуться» у вакансии берёт шаблон по умолчанию и подставляет данные: {вакансия} {компания} {имя} {должность} {навыки} — совпавшие с вакансией, {опыт} — первое предложение «Чем я занимаюсь», {контакты}. Фрагмент в [[двойных скобках]] пропадает, если в нём пустая подстановка.'),
+    h('details', { class: 'hint-box', open: !state.all.letters },
+      h('summary', {}, 'Как откликнуться с письмом — по шагам'),
+      h('ol', { class: 'help-steps' },
+        h('li', {}, 'Заполните профиль: должность, грейд, навыки и «Чем я занимаюсь» (2–5 предложений об опыте и результатах). Из этого собирается письмо.'),
+        h('li', {}, 'Ниже впишите контакты для подписи и выберите, от чьего лица писать («рад» или «рада»). Нажмите «Сохранить».'),
+        h('li', {}, 'У вакансии нажмите «Скопировать письмо». Письмо под эту вакансию сразу окажется в буфере обмена, откроется окно с текстом — его можно поправить.'),
+        h('li', {}, 'Нажмите «Открыть вакансию», на сайте — «Откликнуться», щёлкните в поле сопроводительного письма и вставьте: ', ...pasteKeys(), '.'),
+        h('li', {}, 'Отправьте отклик на сайте и вернитесь: нажмите «Я откликнулся» в окне письма или выберите статус «Откликнулся» у вакансии. Статус ставите только вы — сами мы на сайтах ничего не нажимаем и не отправляем.')),
+      h('p', { class: 'muted small' }, 'Свой шаблон: «+ Шаблон», впишите текст и вставьте подстановки — они заменятся данными вакансии и профиля:'),
+      h('ul', { class: 'help-ph' },
+        ph('{вакансия}', 'название вакансии'),
+        ph('{компания}', 'компания'),
+        ph('{должность}', 'ваша должность из профиля'),
+        ph('{навыки}', 'до 5 навыков: сначала совпавшие с вакансией'),
+        ph('{опыт}', 'первое предложение из «Чем я занимаюсь»'),
+        ph('{имя}', 'имя из профиля'),
+        ph('{контакты}', 'контакты для подписи (поле ниже)')),
+      h('p', { class: 'muted small' }, 'Фрагмент в [[двойных скобках]] исчезает целиком, если подставить нечего. Например, [[ в компании «{компания}»]] пропадёт, если у вакансии не указана компания, — и в письме не будет «в компании «»».')),
     h('div', { class: 'row' }, pick,
-      h('button', { class: 'btn small', type: 'button', onclick: () => { pull(); cur = { id: `t${Date.now().toString(36)}`, name: 'Новый шаблон', text: DEFAULT_TEMPLATES[0].text }; L.templates.push(cur); draw(); } }, '+ Шаблон'),
+      h('button', { class: 'btn small', type: 'button', onclick: () => { pull(); cur = { id: `t${Date.now().toString(36)}`, name: 'Новый шаблон', text: DEFAULT_TEMPLATES.find((t) => t.id === 'short').text }; L.templates.push(cur); draw(); } }, '+ Шаблон'),
       h('button', { class: 'btn small ghost', type: 'button', onclick: () => {
-        if (L.templates.length < 2) return toast('Нужен хотя бы один шаблон');
+        if (cur.auto) return toast('Шаблон «Под вакансию» встроенный — его нельзя удалить, но можно выбрать другой по умолчанию');
         if (!confirm(`Удалить шаблон «${cur.name}»?`)) return;
         L.templates = L.templates.filter((t) => t !== cur);
         if (L.defaultId === cur.id) L.defaultId = L.templates[0].id;
         cur = L.templates[0];
         draw();
       } }, 'Удалить')),
-    h('div', { class: 'field' }, h('span', { class: 'field-label' }, 'Название'), name),
-    text,
-    h('label', { class: 'check' }, def, 'Использовать по умолчанию'),
-    h('div', { class: 'field' }, h('span', { class: 'field-label' }, 'Контакты для подписи'), contacts),
-    h('div', { class: 'savebar' }, h('button', { class: 'btn primary', type: 'button', onclick: save }, 'Сохранить шаблоны'), saved));
+    autoNote,
+    editBox,
+    h('label', { class: 'check' }, def, 'Использовать по умолчанию (для кнопки «Скопировать письмо»)'),
+    h('div', { class: 'grid2' },
+      h('div', { class: 'field' }, h('span', { class: 'field-label' }, 'Контакты для подписи'), contacts),
+      h('div', { class: 'field' }, h('span', { class: 'field-label' }, 'Пишу от лица'), gender)),
+    h('div', { class: 'savebar' }, h('button', { class: 'btn primary', type: 'button', onclick: save }, 'Сохранить'), saved));
 }
 
 // Уведомления о новых подходящих вакансиях в Telegram (через бота solk / job).

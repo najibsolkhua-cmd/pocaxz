@@ -49,6 +49,7 @@
  "ui.css",
  "ui/ads.js",
  "ui/dom.js",
+ "ui/help.js",
  "ui/partners.js",
  "ui/profile.js",
  "ui/sources.js",

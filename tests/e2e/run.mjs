@@ -32,11 +32,6 @@ function route(url) {
   if (p === '/hh2/search') return fx('hh-serp-nodataqa.html');
   if (p === '/vacancy/101') return fx('hh-vacancy-101.html');
   if (p === '/vacancy/104') return fx('hh-vacancy-archived.html');
-  // Как на hh.ru: «Откликнуться» → окно отклика → «Добавить сопроводительное» → поле письма.
-  if (p === '/vacancy/777') return `<!doctype html><meta charset="utf-8"><h1>Python-разработчик</h1>
-    <button data-qa="vacancy-response-link-top" onclick="setTimeout(() => document.getElementById('pop').hidden = false, 400)">Откликнуться</button>
-    <div id="pop" hidden><button data-qa="vacancy-response-letter-toggle" onclick="this.nextElementSibling.hidden = false">Добавить сопроводительное</button>
-    <textarea data-qa="vacancy-response-popup-form-letter-input" hidden></textarea><button id="send">Отправить</button></div>`;
   if (/^\/vacancy\/\d+$/.test(p)) return `<!doctype html><meta charset="utf-8"><h1>Вакансия</h1><div data-qa="vacancy-description"><p>Описание вакансии ${p}. Python, Docker.</p></div>`;
   if (p === '/avito') return Number(u.searchParams.get('p') || 1) >= 2 ? fx('avito-page2.html') : fx('avito.html');
   if (p.startsWith('/moskva/vakansii/python')) return fx('avito-item.html');
@@ -793,36 +788,77 @@ try {
     await page.keyboard.press('Escape');
   });
 
-  await step('отклик в один клик: письмо по шаблону, вакансия открыта, статус «Откликнулся»', async () => {
-    // Контакты для подписи — в настройках писем.
+  await step('письмо под вакансию: копируется в буфер, вакансия открывается, статус ставите вы', async () => {
+    // Контакты и «от лица» — в настройках писем; там же пошаговая инструкция.
     await page.evaluate(() => { location.hash = 'search'; });
     const sec = page.locator('.drawer.open .dsec', { hasText: 'Сопроводительные письма' });
     await sec.waitFor();
+    await sec.locator('summary', { hasText: 'Как откликнуться с письмом' }).waitFor();
+    assert.ok(await sec.locator('.help-steps kbd', { hasText: 'Ctrl' }).count() && await sec.locator('.help-steps kbd', { hasText: '⌘ Cmd' }).count(), 'клавиши для Windows и Mac');
+    assert.match(await sec.locator('.note-ok').textContent(), /письмо собирается заново/, 'по умолчанию — «Под вакансию»');
     await sec.locator('textarea').nth(1).fill('+7 900 000-00-00 · t.me/ivan');
-    await sec.locator('button', { hasText: 'Сохранить шаблоны' }).click();
+    await sec.locator('select').nth(1).selectOption('m');
+    await sec.locator('.savebar button', { hasText: 'Сохранить' }).click();
     await until(async () => (await storage(page)).letters?.contacts === '+7 900 000-00-00 · t.me/ivan', 5000, 'контакты сохранены');
-    // Окно «Письмо»: данные вакансии и профиля подставлены.
+    assert.equal((await storage(page)).letters.defaultId, 'auto');
+    // «Скопировать письмо»: письмо под вакансию — в буфере, окно с шагами; статус не меняется.
     await page.evaluate(() => { location.hash = 'all'; });
     await page.waitForSelector('.drawer.open.dk-all .vc.st-new');
     const card = page.locator('#drawerBody .vc.st-new').first();
+    const key = await card.getAttribute('data-key');
     const title = await card.locator('h3 a').textContent();
-    await card.locator('button', { hasText: 'Письмо' }).click();
-    const letter = await page.locator('dialog.letter-dialog textarea').inputValue();
-    assert.ok(letter.includes(`«${title}»`) && letter.includes('Иван') && letter.includes('t.me/ivan'), letter);
-    assert.ok(!/[{}]/.test(letter), 'нет пустых подстановок');
-    await page.locator('dialog.letter-dialog button', { hasText: '✕' }).click();
-    // «Откликнуться»: новая вкладка с вакансией и статус «Откликнулся».
     const url = await card.locator('h3 a').getAttribute('href');
-    const [tab] = await Promise.all([context.waitForEvent('page'), card.locator('button', { hasText: 'Откликнуться' }).click()]);
+    // Что ушло в буфер обмена — перехватываем (читать буфер в тесте браузер не даёт без запроса).
+    await page.evaluate(() => {
+      const orig = navigator.clipboard.writeText.bind(navigator.clipboard);
+      navigator.clipboard.writeText = (t) => { window.__copied = t; return orig(t); };
+    });
+    await card.locator('button', { hasText: 'Скопировать письмо' }).click();
+    const dlg = page.locator('dialog.letter-dialog');
+    await dlg.locator('.letter-ok', { hasText: 'Письмо скопировано в буфер обмена' }).waitFor();
+    const letter = await dlg.locator('textarea').inputValue();
+    assert.ok(letter.includes(`«${title}»`) && letter.includes('Иван') && letter.includes('t.me/ivan'), letter);
+    assert.match(letter, /Я — python backend-разработчик/i, letter);
+    assert.match(letter, /Буду рад рассказать/, 'от лица мужчины');
+    assert.ok(!/[{}[\]]|\(а\)/.test(letter), 'нет пустых подстановок');
+    assert.equal(await page.evaluate(() => window.__copied), letter, 'в буфер обмена ушло это письмо');
+    const steps = await dlg.locator('.letter-steps').textContent();
+    assert.ok(/Ctrl \+ V/.test(steps) && /⌘ Cmd \+ V/.test(steps) && /Статус ставите только вы/.test(steps), steps);
+    const ukey = `u${key.slice(1)}`;
+    assert.ok(!(await storage(page))[ukey]?.status || (await storage(page))[ukey].status === 'new', 'статус сам не меняется');
+    // «Открыть вакансию» — новая вкладка; статус лишь «Просмотрел», сайт мы не трогаем.
+    const [tab] = await Promise.all([context.waitForEvent('page'), dlg.locator('a', { hasText: 'Открыть вакансию' }).click()]);
     await until(() => tab.url() === url, 8000, 'вакансия открыта');
     await tab.close();
-    await until(async () => Object.entries(await storage(page)).some(([k, u]) => k.startsWith('u:') && u.status === 'responded' && k.endsWith(url.split('/').pop())), 5000, 'статус «Откликнулся»');
-    // hh.ru: расширение нажимает «Откликнуться» и вставляет письмо, отправку оставляет человеку.
-    const r = await page.evaluate((u) => chrome.runtime.sendMessage({ type: 'respondAssist', url: u, platform: 'hh', letter: 'Здравствуйте! Тестовое письмо.' }), `${base}/vacancy/777`);
-    assert.equal(r.prefill, 'filled', JSON.stringify(r));
-    const hhTab = context.pages().find((p) => p.url().endsWith('/vacancy/777'));
-    assert.equal(await hhTab.locator('textarea').inputValue(), 'Здравствуйте! Тестовое письмо.');
-    await hhTab.close();
+    await until(async () => (await storage(page))[ukey]?.status === 'viewed', 5000, 'статус «Просмотрел»');
+    // «Я откликнулся» — только по вашей кнопке.
+    await dlg.locator('button', { hasText: 'Я откликнулся' }).click();
+    await until(async () => (await storage(page))[ukey]?.status === 'responded', 5000, 'статус «Откликнулся»');
+    assert.equal(await dlg.count(), 0, 'окно закрыто');
+    // В «Моих откликах» нет пустой жёлтой полосы, пока напоминать нечего.
+    await page.evaluate(() => { location.hash = 'applied'; });
+    await page.waitForSelector('.drawer.open.dk-applied .vc');
+    assert.equal(await page.locator('.drawer.open .reminders').isVisible(), false, 'пустой блок напоминаний скрыт');
+    await page.keyboard.press('Escape');
+  });
+
+  await step('справка «Что делать?» у источника: защищённый режим банка, пустая страница', async () => {
+    await page.evaluate(() => chrome.storage.local.set({
+      'srcstate:tb': { lastRunAt: new Date().toISOString(), lastStatus: 'failed', lastErrorKind: 'guarded', lastError: 'Защищённый режим' },
+      'srcstate:spa': { lastRunAt: new Date().toISOString(), lastStatus: 'empty', lastFound: 0 },
+    }));
+    await page.evaluate(() => { location.hash = 'generic'; });
+    const help = page.locator('.drawer.open .scan-help', { hasText: 'Защищённом режиме' }).first();
+    await help.waitFor({ state: 'attached' });
+    await help.locator('summary').click();
+    const text = await help.textContent();
+    assert.ok(/Безопасность/.test(text) && /Защита от угроз/.test(text) && /Открывать страницы онлайн-банков и платёжных систем в защищённом режиме/.test(text), text);
+    await page.evaluate(() => chrome.storage.local.set({ ping: Date.now() }));
+    await page.waitForTimeout(600);
+    assert.ok(await page.locator('.drawer.open .scan-help[open]', { hasText: 'Защита от угроз' }).count(), 'раскрытая справка не схлопывается при обновлении');
+    assert.ok(await page.locator('.drawer.open .scan-help summary', { hasText: 'Вакансий не нашлось' }).count(), 'справка для пустой страницы');
+    await page.evaluate(() => { location.hash = 'search'; });
+    await page.locator('.drawer.open .dsec h3', { hasText: 'Сайт не сканируется — что делать' }).waitFor();
     await page.keyboard.press('Escape');
   });
 
@@ -846,7 +882,19 @@ try {
     assert.equal(await page.evaluate(() => chrome.runtime.sendMessage({ type: 'checkReminders' })), 0, 'повторно не напоминает');
     await page.evaluate(() => { location.hash = 'applied'; });
     await page.locator('.drawer.open .reminders', { hasText: '7 дней без ответа' }).waitFor();
-    assert.ok(await page.locator('#drawerBody .vc.st-interview input[type=datetime-local]').count(), 'поле даты интервью');
+    // Дата интервью вписывается с клавиатуры: год не «слетает», пока его печатаешь.
+    const input = page.locator('#drawerBody .vc.st-interview input[type=datetime-local]');
+    await input.evaluate((el) => { el.dataset.mark = '1'; el.focus(); });
+    const ru = await page.evaluate(() => /^ru/.test(new Intl.DateTimeFormat().resolvedOptions().locale));
+    const keys = ru ? ['2', '7', '1', '1', '2', '0', '2', '7', '1', '4', '3', '0'] : ['1', '1', '2', '7', '2', '0', '2', '7', '0', '2', '3', '0', 'P'];
+    for (const k of keys) { await page.keyboard.type(k); await page.waitForTimeout(150); }
+    assert.equal(await input.evaluate((el) => el.dataset.mark), '1', 'поле не перерисовалось во время ввода');
+    assert.equal(await input.inputValue(), '2027-11-27T14:30');
+    await page.keyboard.press('Enter');
+    const ivKey = `u${other.slice(1)}`;
+    await until(async () => (await storage(page))[ivKey]?.interviewAt === new Date('2027-11-27T14:30').toISOString(), 5000, 'дата интервью сохранена');
+    await page.waitForTimeout(500);
+    assert.equal(await page.locator('#drawerBody .vc.st-interview input[type=datetime-local]').inputValue(), '2027-11-27T14:30', 'после сохранения год на месте');
     await page.keyboard.press('Escape');
   });
 

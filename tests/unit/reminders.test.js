@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { remindersFor, dueReminders, pruneSent } from '../../extension/lib/reminders.js';
+import { remindersFor, dueReminders, pruneSent, leftText } from '../../extension/lib/reminders.js';
 
 const now = Date.parse('2026-10-20T10:00:00');
 const ago = (days) => new Date(now - days * 86400e3).toISOString();
@@ -18,6 +18,11 @@ test('интервью: накануне, за 3 часа, после', () => {
   assert.equal(iv('2026-10-21T09:00:00')[0].text, 'Интервью завтра в 09:00 — подготовьтесь');
   assert.equal(iv('2026-10-20T18:30:00')[0].text, 'Интервью сегодня в 18:30 — подготовьтесь');
   assert.equal(iv('2026-10-20T12:00:00')[0].text, 'Интервью через 2 ч (в 12:00) — подготовьтесь');
+  assert.equal(iv('2026-10-20T10:01:00')[0].text, 'Интервью через 1 мин (в 10:01) — подготовьтесь', 'минута — это не «1 ч»');
+  assert.equal(iv('2026-10-20T10:45:00')[0].text, 'Интервью через 45 мин (в 10:45) — подготовьтесь');
+  assert.equal(iv('2026-10-20T11:20:00')[0].text, 'Интервью через 1 ч 20 мин (в 11:20) — подготовьтесь');
+  assert.equal(leftText(20e3), '1 мин');
+  assert.equal(leftText(59.6 * 60e3), '1 ч');
   assert.equal(iv('2026-10-19T15:00:00')[0].kind, 'ivafter');
   assert.deepEqual(iv('2026-10-25T10:00:00'), [], 'до интервью далеко');
 });

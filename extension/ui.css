@@ -592,3 +592,28 @@ body.popup { width: 330px; padding: 14px; }
 .reminders { background: #fff4c2; border-radius: 18px; padding: 14px 18px; margin-bottom: 14px; }
 .reminders h3 { margin: 0 0 6px; font-size: 16px; }
 .reminders ul { margin: 0; padding-left: 0; list-style: none; display: grid; gap: 4px; font-size: 14px; }
+
+/* v0.12: письмо — копирование и шаги, справка, напоминания */
+.reminders:empty, .reminders[hidden] { display: none; }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; margin-top: 10px; }
+kbd { display: inline-block; padding: 1px 7px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 7px; background: #fff; font: 600 12.5px/1.5 Manrope, sans-serif; color: var(--ink); white-space: nowrap; }
+.kbd-pair { white-space: nowrap; }
+.letter-ok { padding: 12px 14px; border-radius: 14px; background: var(--ok-soft); color: #0c5a31; font-size: 14px; line-height: 1.6; }
+.letter-ok.bad { background: var(--warn-soft); color: var(--warn); }
+.letter-ok[hidden] { display: none; }
+.letter-steps, .help-steps { margin: 0; padding-left: 22px; display: grid; gap: 6px; font-size: 14px; line-height: 1.5; color: var(--ink); }
+.help-steps { margin-top: 8px; font-size: 13px; max-width: 760px; }
+.help-ph { margin: 6px 0 0; padding-left: 0; list-style: none; display: grid; gap: 2px; font-size: 13px; }
+.help-ph code, .scan-help code { font: 600 12.5px/1.4 ui-monospace, Menlo, monospace; background: var(--soft); padding: 1px 6px; border-radius: 6px; color: var(--ink); }
+.note-ok { margin: 8px 0 0; padding: 10px 12px; border-radius: 12px; background: var(--ok-soft); color: #0c5a31; font-size: 13px; line-height: 1.45; }
+.note-ok[hidden], .tpl-edit[hidden] { display: none; }
+.tpl-edit { display: grid; gap: 10px; }
+.vc-iv .bad { color: var(--red); font-weight: 600; }
+.scan-help { margin-top: 6px; font-size: 13px; color: var(--ink); }
+.scan-help summary { cursor: pointer; font-weight: 700; color: var(--red); width: fit-content; }
+.scan-help ol, .scan-help ul { margin: 6px 0 0; padding-left: 20px; display: grid; gap: 4px; line-height: 1.5; }
+.scan-help p { margin: 6px 0 0; line-height: 1.5; }
+.scan-help .path { font-weight: 700; }
+a.btn { text-decoration: none; display: inline-flex; align-items: center; }
+/* Раскрытая справка удлиняет строку источника — переключатель и кнопки остаются наверху. */
+.src-row:has(.scan-help[open]) { align-items: start; }

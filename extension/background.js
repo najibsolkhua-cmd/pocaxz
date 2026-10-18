@@ -396,7 +396,7 @@ async function runSource(src, settings, quota = settings.scanLimit) {
     await store.saveSources(list.map((x) => (x.id === src.id ? { ...x, url: startUrl, name: store.sourceName(startUrl, x.platform) } : x)));
   }
   if (!(await hasAccess(startUrl))) {
-    await store.setSrcState(src.id, { ...st, lastRunAt: started.toISOString(), nextRunAt: new Date(Date.now() + src.intervalMin * 60e3).toISOString(), lastStatus: 'failed', lastError: NO_ACCESS(startUrl), failures: (st.failures || 0) + 1 });
+    await store.setSrcState(src.id, { ...st, lastRunAt: started.toISOString(), nextRunAt: new Date(Date.now() + src.intervalMin * 60e3).toISOString(), lastStatus: 'failed', lastError: NO_ACCESS(startUrl), lastErrorKind: 'access', failures: (st.failures || 0) + 1 });
     await store.addRun({ at: started.toISOString(), source: src.name, sourceId: src.id, platform: src.platform, status: 'failed', found: 0, added: 0, error: NO_ACCESS(startUrl), ms: 0 });
     return { status: 'failed', found: 0, added: 0, fresh: 0 };
   }
@@ -415,6 +415,7 @@ async function runSource(src, settings, quota = settings.scanLimit) {
   let handle = null;
   let mode = src.platform === 'generic' && (src.cfg?.fetchMode || st.mode === 'fetch') ? 'fetch' : 'tab';
   let guarded = false; // браузер не пустил расширение на страницу (защищённый режим)
+  let errorKind = null; // для справки «Что делать?» у источника: access | download | error
   // Что подставили из профиля — показываем у источника, чтобы можно было проверить.
   let fillInfo = startUrl !== src.url ? { query: fill.query, via: 'ссылка' } : null;
   try {
@@ -485,7 +486,7 @@ async function runSource(src, settings, quota = settings.scanLimit) {
       if (mode === 'fetch' && !res?.items?.length) {
         if (handle) { handle.close(); handle = null; currentHandle = null; }
         res = await viaOffscreen('parse', url, cfg);
-        if (res.fail) { error = `не удалось скачать страницу: ${res.fail}`; break; }
+        if (res.fail) { error = `не удалось скачать страницу: ${res.fail}`; errorKind = 'download'; break; }
       }
       pages++;
       if (pages === 1) total = res.total;
@@ -510,7 +511,7 @@ async function runSource(src, settings, quota = settings.scanLimit) {
         try { await navigate(handle.tabId, url); } catch {
           // Сеть моргнула — ещё одна попытка, потом сдаёмся и сохраняем собранное.
           await nap(rand(3000, 6000));
-          try { await navigate(handle.tabId, url); } catch (e) { error = String(e?.message || e); break; }
+          try { await navigate(handle.tabId, url); } catch (e) { error = String(e?.message || e); errorKind = 'download'; break; }
         }
       }
     }
@@ -567,7 +568,9 @@ async function runSource(src, settings, quota = settings.scanLimit) {
       if (isPermError(error)) {
         const tab = handle ? await chrome.tabs.get(handle.tabId).catch(() => null) : null;
         const at = tab?.url || startUrl;
-        error = /^https?:/i.test(at) && (await hasAccess(at))
+        const reachable = /^https?:/i.test(at) && (await hasAccess(at));
+        errorKind = reachable ? 'download' : 'access';
+        error = reachable
           ? `Страница ${new URL(startUrl).hostname} не открылась или ушла на другой адрес. Откройте ссылку вручную: если сайт работает, повторите поиск.`
           : NO_ACCESS(/^https?:/i.test(at) ? at : startUrl);
       }
@@ -581,7 +584,8 @@ async function runSource(src, settings, quota = settings.scanLimit) {
   }
 
   if (guarded && !collected.size && !stopRequested) {
-    error = `Яндекс Браузер открывает ${new URL(startUrl).hostname} в «Защищённом режиме» (так он защищает сайты банков) и не пускает туда расширения, а в скачанной без вкладки странице вакансий нет. Выход: отключить защищённый режим для сайтов банков в настройках браузера (раздел «Безопасность») или вставить ссылку на страницу, где поиск уже выполнен.`;
+    error = `Яндекс Браузер открывает ${new URL(startUrl).hostname} в «Защищённом режиме» и не пускает туда расширения. Выключите его: ☰ → Настройки → Безопасность → «Защита от угроз» → снимите галочку «Открывать страницы онлайн-банков и платёжных систем в защищённом режиме», затем нажмите «Искать». Подробнее — «Что делать?» ниже.`;
+    errorKind = 'guarded';
   }
   const failures = blocked || (error && !collected.size) ? (st.failures || 0) + 1 : 0;
   let status = 'ok';
@@ -607,6 +611,7 @@ async function runSource(src, settings, quota = settings.scanLimit) {
     nextRunAt: new Date(Date.now() + waitMin * 60e3).toISOString(),
     lastStatus: status,
     lastError: note,
+    lastErrorKind: blocked ? 'blocked' : error && !collected.size ? (errorKind || 'error') : null,
     lastTotal: total,
     lastFound: collected.size,
     lastAdded: stats.added,
@@ -840,44 +845,6 @@ async function collectFromTab(tabId) {
   return { ...stats, detailed, total: res.total, platform: res.platform, blocked: res.blocked, reason: res.reason, error: res.error };
 }
 
-// «Откликнуться»: открываем вакансию. На hh.ru нажимаем кнопку «Откликнуться» и вставляем
-// сопроводительное письмо в форму — отправку письма подтверждает сам человек.
-async function respondAssist({ url, letter, platform }) {
-  if (!/^https?:\/\//i.test(url || '')) return { opened: false };
-  const tab = await chrome.tabs.create({ url, active: true });
-  if (platform !== 'hh' || !letter) return { opened: true };
-  try {
-    await waitTabComplete(tab.id);
-    const [r] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: hhPrefillLetter, args: [letter] });
-    return { opened: true, prefill: r?.result };
-  } catch (e) {
-    return { opened: true, prefill: `error: ${e.message}` };
-  }
-}
-
-// Выполняется на странице вакансии hh.ru.
-async function hhPrefillLetter(letter) {
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const q = (s) => document.querySelector(s);
-  const LETTER = '[data-qa="vacancy-response-popup-form-letter-input"], textarea[name="letter"]';
-  const button = q('[data-qa="vacancy-response-link-top"]') || [...document.querySelectorAll('a, button')].find((b) => /^откликнуться$/i.test(b.textContent.trim()));
-  if (!button) return 'no-button';
-  button.click();
-  for (let i = 0; i < 40; i++) {
-    await sleep(300);
-    if (!q(LETTER)) q('[data-qa="vacancy-response-letter-toggle"]')?.click();
-    const area = q(LETTER);
-    if (area) {
-      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(area, letter);
-      area.dispatchEvent(new Event('input', { bubbles: true }));
-      area.dispatchEvent(new Event('change', { bubbles: true }));
-      area.focus();
-      return 'filled';
-    }
-  }
-  return 'no-form';
-}
-
 // Пример подходящей вакансии для профиля: открываем ссылку и читаем её текст.
 async function inspectUrl(url) {
   const settings = await store.getSettings();
@@ -916,7 +883,6 @@ const handlers = {
   }),
   collectTab: ({ tabId }) => collectFromTab(tabId),
   inspectUrl: ({ url }) => inspectUrl(url),
-  respondAssist: (msg) => respondAssist(msg),
   checkReminders: () => checkReminders(),
   async addSource({ url, name, platform }) {
     const sources = await store.getSources();

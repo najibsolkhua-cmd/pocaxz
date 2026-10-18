@@ -9,6 +9,15 @@ const HOUR = 3600e3;
 const timeOf = (iso) => new Date(iso).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
 const sameDay = (a, b) => new Date(a).toDateString() === new Date(b).toDateString();
 
+// Сколько осталось: «1 мин», «45 мин», «2 ч», «1 ч 20 мин» — без округления минут до часа.
+export function leftText(ms) {
+  const min = Math.max(1, Math.round(ms / 60e3));
+  if (min < 60) return `${min} мин`;
+  const hours = Math.floor(min / 60);
+  const rest = min % 60;
+  return rest ? `${hours} ч ${rest} мин` : `${hours} ч`;
+}
+
 export function remindersFor(v, now = Date.now()) {
   const out = [];
   const since = v.statusChangedAt ? now - Date.parse(v.statusChangedAt) : 0;
@@ -21,7 +30,7 @@ export function remindersFor(v, now = Date.now()) {
   if (v.status === 'interview' && v.interviewAt) {
     const at = Date.parse(v.interviewAt);
     const left = at - now;
-    if (left > 0 && left <= 3 * HOUR) add('iv3', `Интервью через ${Math.max(1, Math.round(left / HOUR))} ч (в ${timeOf(at)}) — подготовьтесь`, v.interviewAt);
+    if (left > 0 && left <= 3 * HOUR) add('iv3', `Интервью через ${leftText(left)} (в ${timeOf(at)}) — подготовьтесь`, v.interviewAt);
     else if (left > 3 * HOUR && left <= DAY) add('iv24', `Интервью ${sameDay(at, now) ? 'сегодня' : 'завтра'} в ${timeOf(at)} — подготовьтесь`, v.interviewAt);
     else if (left < -2 * HOUR && left > -2 * DAY) add('ivafter', 'Как прошло интервью? Поблагодарите и отметьте итог', v.interviewAt);
   }

@@ -2,6 +2,7 @@
 
 import * as store from '../lib/store.js';
 import { h, fmtTime } from './dom.js';
+import { scanHelp } from './help.js';
 
 const send = (msg) => chrome.runtime.sendMessage(msg);
 const INTERVALS = [30, 60, 120, 240, 360, 720, 1440];
@@ -81,6 +82,7 @@ export function sourceRows(sources, all) {
         h('div', { class: `src-state ${bad ? 'bad' : ''}` }, stateLine(st),
           st.lastError ? h('span', { class: 'muted' }, ` · ${st.lastError}`) : null,
           ['blocked', 'partial'].includes(st.lastStatus) ? h('a', { href: s.url, target: '_blank', rel: 'noopener', class: 'fix' }, ' Открыть и пройти проверку →') : null),
+        scanHelp(s, st),
         fillLine(s, st),
         s.platform === 'generic' ? h('label', { class: 'src-autofill', title: 'Перед поиском вписывать должность и город из профиля в ссылку или в поля поиска на сайте' },
           h('input', { type: 'checkbox', checked: s.autoFill !== false, onchange: (e) => update(s.id, { autoFill: e.target.checked }) }), 'Подставлять должность и город из профиля') : null),
