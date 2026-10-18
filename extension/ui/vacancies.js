@@ -3,6 +3,61 @@
 import * as store from '../lib/store.js';
 import { SKILL_NAMES } from '../lib/parse.js';
 import { h, fmtTime, fmtDate, fmtSalary, daysSince } from './dom.js';
+import { DEFAULT_TEMPLATES, renderLetter } from '../lib/letters.js';
+import { remindersFor } from '../lib/reminders.js';
+
+// Значение для <input type="datetime-local"> в местном времени.
+const localInput = (iso) => {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return new Date(d.getTime() - d.getTimezoneOffset() * 60e3).toISOString().slice(0, 16);
+};
+
+// Профиль и шаблоны писем для кнопки «Откликнуться» — их передаёт главная (setCardContext).
+let ctx = { profile: {}, letters: null };
+export function setCardContext(next) { ctx = { ...ctx, ...next }; }
+const lettersCfg = () => ctx.letters || { templates: DEFAULT_TEMPLATES, defaultId: 'short', contacts: '' };
+const say = (text) => window.dispatchEvent(new CustomEvent('solk-toast', { detail: text }));
+
+export function letterFor(v, s, templateId) {
+  const L = lettersCfg();
+  const t = L.templates.find((x) => x.id === (templateId || L.defaultId)) || L.templates[0];
+  return renderLetter(t, { vacancy: v, profile: ctx.profile, matched: s?.matched || [], contacts: L.contacts });
+}
+
+// Отклик в один клик: письмо — в буфер обмена, вакансия — в новой вкладке, статус — «Откликнулся».
+// На hh.ru расширение само нажимает «Откликнуться» и вставляет письмо в форму.
+export async function respond(v, s, letter = letterFor(v, s)) {
+  let copied = false;
+  try { await navigator.clipboard.writeText(letter); copied = true; } catch { /* нет доступа к буферу */ }
+  chrome.runtime.sendMessage({ type: 'respondAssist', url: v.url, letter, platform: v.platform }).catch(() => {});
+  if (['new', 'viewed'].includes(v.status)) await store.setUserFields(v.key, { status: 'responded' });
+  say(v.platform === 'hh'
+    ? 'Открываю вакансию на hh.ru: нажму «Откликнуться» и вставлю письмо. Проверьте его перед отправкой.'
+    : copied ? 'Письмо скопировано — вставьте его в форму отклика на сайте (Ctrl+V). Статус: «Откликнулся».' : 'Вакансия открыта. Статус: «Откликнулся».');
+}
+
+// Окно «Письмо»: выбрать шаблон, поправить текст, скопировать или откликнуться.
+export function openLetterDialog(v, s) {
+  const L = lettersCfg();
+  const area = h('textarea', { class: 'letter-text', rows: 14 }, letterFor(v, s));
+  const pick = h('select', { onchange: (e) => { area.value = letterFor(v, s, e.target.value); } },
+    L.templates.map((t) => h('option', { value: t.id, selected: t.id === L.defaultId }, t.name)));
+  const dlg = h('dialog', { class: 'letter-dialog', onclose: () => dlg.remove() },
+    h('form', { method: 'dialog', class: 'letter-form' },
+      h('div', { class: 'letter-head' }, h('b', {}, `Письмо: ${v.title}`), h('button', { class: 'link muted', value: 'cancel' }, '✕')),
+      h('label', { class: 'flabel' }, 'Шаблон', pick),
+      area,
+      h('p', { class: 'muted small' }, 'Шаблоны и контакты для подписи — в «Поиск и настройки» → «Сопроводительные письма».'),
+      h('div', { class: 'row' },
+        h('button', { class: 'btn primary', type: 'button', onclick: async () => { await respond(v, s, area.value); dlg.close(); } }, 'Откликнуться с этим письмом'),
+        h('button', { class: 'btn', type: 'button', onclick: async () => {
+          try { await navigator.clipboard.writeText(area.value); say('Письмо скопировано'); } catch { area.select(); say('Выделил текст — нажмите Ctrl+C'); }
+        } }, 'Скопировать'))));
+  document.body.append(dlg);
+  dlg.showModal();
+  return dlg;
+}
 
 const GRADE_LABEL = { intern: 'Стажёр', junior: 'Junior', middle: 'Middle', senior: 'Senior', lead: 'Lead' };
 const FORMAT_LABEL = { remote: 'Удалённо', hybrid: 'Гибрид', office: 'Офис' };
@@ -40,7 +95,12 @@ export function vacancyCard(v, s) {
         // а не «N ч назад» от даты публикации: сайты часто дают только дату, и часы выходили неверными.
         h('span', { class: 'vc-src', title: `Впервые найдена: ${fmtTime(v.firstSeenAt)}${v.publishedAt ? ` · опубликована: ${fmtDate(v.publishedAt)}` : ''}` },
           `${store.PLATFORM_NAMES[v.platform]} · поиск ${fmtTime(v.lastSeenAt || v.firstSeenAt)}${v.publishedAt ? ` · опубл. ${fmtDate(v.publishedAt)}` : ''}`),
-        waiting != null ? h('span', { class: `vc-wait ${waiting >= 7 ? 'late' : ''}` }, `ждёт ответа ${waiting} дн`) : null),
+        waiting != null ? h('span', { class: `vc-wait ${waiting >= 7 ? 'late' : ''}` }, `ждёт ответа ${waiting} дн`) : null,
+        v.status === 'interview' && v.interviewAt ? h('span', { class: 'vc-wait' }, `интервью ${fmtTime(v.interviewAt)}`) : null),
+      remindersFor(v).map((r) => h('div', { class: 'vc-remind' }, `⏰ ${r.text}`)),
+      v.status === 'interview' ? h('label', { class: 'vc-iv' }, 'Дата и время интервью',
+        h('input', { type: 'datetime-local', value: localInput(v.interviewAt), onchange: (e) => store.setUserFields(v.key, { interviewAt: e.target.value ? new Date(e.target.value).toISOString() : null }) }),
+        h('span', { class: 'muted small' }, 'напомню накануне и за 3 часа')) : null,
       h('div', { class: 'vc-why' }, whyLine(s)),
       (v.snippet || v.description) ? h('p', { class: 'vc-snippet' }, (v.snippet || v.description).slice(0, 360)) : null,
       (s.matched.length || s.missing.length) ? h('div', { class: 'chips' },
@@ -50,8 +110,10 @@ export function vacancyCard(v, s) {
         v.alsoAt.map((a, i) => [i ? ', ' : '', h('a', { href: a.url, target: '_blank', rel: 'noopener' }, a.source || store.PLATFORM_NAMES[a.platform])])) : null,
       noteBox),
     h('div', { class: 'vc-side' },
+      ['new', 'viewed'].includes(v.status) ? h('button', { class: 'btn small primary vc-respond', type: 'button', title: 'Откроет вакансию, скопирует сопроводительное письмо и поставит статус «Откликнулся»', onclick: () => respond(v, s) }, 'Откликнуться') : null,
       h('select', { class: `status-sel st-${v.status}`, title: 'Статус', onchange: (e) => setStatus(e.target.value) },
         store.STATUSES.map(([k, label]) => h('option', { value: k, selected: k === v.status }, label))),
+      h('button', { class: 'link', type: 'button', onclick: () => openLetterDialog(v, s) }, 'Письмо'),
       h('button', { class: 'link', type: 'button', onclick: () => { noteBox.hidden = !noteBox.hidden; if (!noteBox.hidden) noteBox.querySelector('textarea').focus(); } }, v.note ? 'Заметка ✎' : 'Заметка'),
       v.status !== 'hidden' ? h('button', { class: 'link muted', type: 'button', onclick: () => setStatus('hidden') }, 'Скрыть') : null));
 }
@@ -110,7 +172,7 @@ export function createVacancyList({ platform = null, statuses = null, showStatus
   const hint = statuses ? null : h('details', { class: 'hint-box' },
     h('summary', {}, 'Что значат проценты и статусы?'),
     h('p', {}, '«Подходит мне» — насколько вакансия совпадает с вашим профилем: желаемая должность и её синонимы, навыки, текст резюме и «Чем я занимаюсь», зарплата, грейд и свежесть. Под каждой вакансией написано, из чего сложилась оценка. Ползунок скрывает вакансии ниже выбранного процента — только те, что вы ещё не разбирали.'),
-    h('p', {}, 'Статусы ставите вы сами: «Откликнулся» — нажали «Откликнуться» на сайте, «Отправил резюме» — отправили резюме, «Отказ» — работодатель ответил отказом, «Скрыто» — вакансия неинтересна. Всё, кроме «Не смотрел» и «Просмотрел», попадает в «Мои отклики». Вакансии, снятые с публикации, исчезают из выдачи, но в «Моих откликах» остаются.'),
+    h('p', {}, 'Статусы ставите вы сами: «Откликнулся» — нажали «Откликнуться» на сайте, «Отправил резюме» — отправили резюме, «Отказ» — работодатель ответил отказом, «Скрыто» — вакансия неинтересна. Всё, кроме «Не смотрел», «Просмотрел» и «Скрыто», попадает в «Мои отклики». Вакансии, снятые с публикации, исчезают из выдачи, но в «Моих откликах» остаются.'),
     h('p', {}, '«поиск сегодня 18:12» — когда вакансию последний раз видел поиск solk / job; «опубл.» — дата публикации на сайте.'));
 
   const root = h('div', { class: 'vc-wrap' }, showStatusTabs ? tabsEl : null, filters, hint, listEl, h('div', { class: 'center' }, moreBtn));

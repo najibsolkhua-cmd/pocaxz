@@ -34,4 +34,14 @@ CONFIG.partners = {
   refreshHours: 6,
 };
 
+// Резервная копия на Яндекс Диске. clientId — из приложения на oauth.yandex.ru
+// (доступ «Яндекс Диск: доступ к папке приложения»), Redirect URI — https://<id расширения>.chromiumapp.org/
+// Пока clientId пустой, раздел «Резервная копия на Яндекс Диске» показывается как «скоро».
+CONFIG.yandexDisk = {
+  clientId: '',
+  apiBase: 'https://cloud-api.yandex.net/v1/disk',
+  path: 'app:/solk-job-backup.json',
+  autoHours: 12, // автокопия не чаще, чем раз в столько часов
+};
+
 export const supportLink = () => (CONFIG.telegram.botUsername ? `https://t.me/${CONFIG.telegram.botUsername}` : CONFIG.supportUrl);

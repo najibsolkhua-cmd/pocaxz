@@ -21,7 +21,7 @@ test('баннер без рекламодателя или с http-ссылко
   assert.deepEqual(list.map((b) => b.id), ['c', 'c', 'c']);
 });
 
-test('статусы: «Откликнулся» между «Просмотрел» и «Отправил резюме»; «Мои отклики» — всё, кроме двух первых', () => {
+test('статусы: «Откликнулся» между «Просмотрел» и «Отправил резюме»; «Мои отклики» — без «Не смотрел», «Просмотрел» и «Скрыто»', () => {
   assert.deepEqual(STATUSES.map(([k]) => k), ['new', 'viewed', 'responded', 'applied', 'interview', 'offer', 'rejected', 'hidden']);
-  assert.deepEqual(MY_STATUSES, STATUSES.map(([k]) => k).filter((k) => !['new', 'viewed'].includes(k)));
+  assert.deepEqual(MY_STATUSES, STATUSES.map(([k]) => k).filter((k) => !['new', 'viewed', 'hidden'].includes(k)));
 });

@@ -17,5 +17,8 @@ export function loadConfig(env = process.env) {
     installUrl: env.INSTALL_URL || 'https://solkhua.ru',
     humanSupport: env.HUMAN_SUPPORT || 'https://t.me/max_max3700',
     notifyPerHour: Number(env.NOTIFY_PER_HOUR) || 30,
+    // Отчёт по баннерам: /stats?key=STATS_KEY в браузере и команда /stats для ADMIN_CHAT_IDS.
+    statsKey: env.STATS_KEY || '',
+    adminChatIds: (env.ADMIN_CHAT_IDS || '').split(',').map((x) => Number(x.trim())).filter(Boolean),
   };
 }

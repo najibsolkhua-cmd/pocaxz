@@ -75,6 +75,11 @@ await shot('all', 'screenshot-2-vacancies.png');
 await shot('applied', 'screenshot-3-responses.png');
 await shot('profile', 'screenshot-4-profile.png');
 await shot('generic', 'screenshot-5-sites.png');
+await page.evaluate(() => { location.hash = 'all'; });
+await page.waitForTimeout(900);
+await page.locator('#drawerBody .vc button', { hasText: 'Письмо' }).first().click();
+await page.waitForTimeout(500);
+await page.screenshot({ path: path.join(out, 'screenshot-6-letter.png') });
 await ctx.close();
 
 // Промо-картинки из HTML.

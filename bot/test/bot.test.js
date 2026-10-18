@@ -103,3 +103,32 @@ test('текст уведомления экранирует HTML и огран�
   assert.equal((t.match(/<a /g) || []).length, 10);
   assert.ok(t.startsWith('🔔 Новых: 15'));
 });
+
+test('счётчики баннеров: только общие числа, отчёт с CTR по ключу, /stats для админа', async () => {
+  const store = createStore(fs.mkdtempSync(path.join(os.tmpdir(), 'bot-')));
+  const tg = fakeTg();
+  const server = createApi({ store, tg, statsKey: 'secret' }).listen(0);
+  await new Promise((r) => server.once('listening', r));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const post = (body) => fetch(`${base}/api/ad-events`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  try {
+    assert.equal((await post({ events: { 'school-marketing': { view: 40, click: 2 }, 'bad id!': { view: 5 } } })).status, 200);
+    assert.equal((await post({ events: { 'school-marketing': { view: 60, click: 1 }, bank: { view: 1e9, click: 3 } } })).status, 200);
+    assert.equal((await post({ events: {} })).status, 400);
+    assert.equal((await fetch(`${base}/api/ad-stats?key=wrong`)).status, 403);
+    const r = await (await fetch(`${base}/api/ad-stats?key=secret`)).json();
+    assert.deepEqual(r.banners.find((b) => b.id === 'school-marketing'), { id: 'school-marketing', view: 100, click: 3, ctr: 3 });
+    assert.equal(r.banners.find((b) => b.id === 'bank').view, 5000, 'накрутка обрезана');
+    assert.ok(!r.banners.some((b) => b.id === 'bad id!'));
+    const html = await (await fetch(`${base}/stats?key=secret`)).text();
+    assert.match(html, /<td>school-marketing<\/td><td>100<\/td><td>3<\/td><td>3<\/td>/);
+    // /stats в Telegram — только админу.
+    const bot = createBot({ tg, store, answerer: { answer: async () => 'ответ', forget() {} }, config: { ...config, adminChatIds: [1] } });
+    await bot.handle({ message: { chat: { id: 2 }, text: '/stats' } });
+    assert.equal(tg.sent.at(-1).text, 'ответ', 'не админ — обычный вопрос');
+    await bot.handle({ message: { chat: { id: 1 }, text: '/stats' } });
+    assert.match(tg.sent.at(-1).text, /school-marketing: 100 показов, 3 кликов, CTR 3%/);
+  } finally {
+    server.close();
+  }
+});

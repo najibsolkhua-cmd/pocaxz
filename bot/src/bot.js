@@ -41,6 +41,12 @@ export function createBot({ tg, store, answerer, config }) {
       await tg.send(chatId, welcome(name), { reply_markup: menu });
       return;
     }
+    if (/^\/stats(@\w+)?$/.test(text) && config.adminChatIds?.includes(chatId)) {
+      const r = store.adReport(7);
+      const lines = r.banners.map((b) => `${esc(b.id)}: ${b.view} показов, ${b.click} кликов, CTR ${b.ctr}%`);
+      await tg.send(chatId, `📊 Баннеры за 7 дней\n\n${lines.join('\n') || 'Пока нет показов.'}`);
+      return;
+    }
     if (/^\/new(@\w+)?$/.test(text)) {
       answerer.forget(chatId);
       await tg.send(chatId, 'Начнём сначала — задайте вопрос.');

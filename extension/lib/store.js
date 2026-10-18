@@ -26,10 +26,12 @@ export const STATUSES = [
   ['hidden', 'Скрыто'],
 ];
 
-// «Мои отклики» — всё, с чем вы уже работаете: любой статус, кроме «Не смотрел» и «Просмотрел».
-export const MY_STATUSES = ['responded', 'applied', 'interview', 'offer', 'rejected', 'hidden'];
+// «Мои отклики» — всё, с чем вы уже работаете: любой статус, кроме «Не смотрел», «Просмотрел» и «Скрыто».
+export const MY_STATUSES = ['responded', 'applied', 'interview', 'offer', 'rejected'];
 // Ждём ответа работодателя.
 export const WAITING_STATUSES = ['responded', 'applied'];
+
+export const saveLetters = (letters) => local.set({ letters });
 
 export const DEFAULT_SETTINGS = {
   autoRun: true,
@@ -44,6 +46,7 @@ export const DEFAULT_SETTINGS = {
   scanLimit: 100,          // сколько вакансий проверить за один поиск — делится между источниками
   deepCheck: 30,           // у скольких лучших новых вакансий открывать полное описание
   pauseBetweenSources: [8000, 20000], // пауза между источниками, мс
+  reminders: true,         // напоминания о следующем шаге (браузер и Telegram)
 };
 
 // Лимит делится между источниками поровну, но не меньше ~страницы выдачи на источник:
@@ -164,7 +167,7 @@ export function vacanciesFrom(all) {
     // Снятые с публикации вакансии пропадают из выдачи, если вы с ними ещё не работали;
     // всё, что в «Моих откликах», остаётся навсегда.
     if (v.archived && !MY_STATUSES.includes(u.status)) continue;
-    out.push({ ...v, status: u.status || 'new', note: u.note || '', statusChangedAt: u.statusChangedAt || null });
+    out.push({ ...v, status: u.status || 'new', note: u.note || '', statusChangedAt: u.statusChangedAt || null, interviewAt: u.interviewAt || null });
   }
   return out;
 }

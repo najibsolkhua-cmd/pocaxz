@@ -32,6 +32,11 @@ function route(url) {
   if (p === '/hh2/search') return fx('hh-serp-nodataqa.html');
   if (p === '/vacancy/101') return fx('hh-vacancy-101.html');
   if (p === '/vacancy/104') return fx('hh-vacancy-archived.html');
+  // Как на hh.ru: «Откликнуться» → окно отклика → «Добавить сопроводительное» → поле письма.
+  if (p === '/vacancy/777') return `<!doctype html><meta charset="utf-8"><h1>Python-разработчик</h1>
+    <button data-qa="vacancy-response-link-top" onclick="setTimeout(() => document.getElementById('pop').hidden = false, 400)">Откликнуться</button>
+    <div id="pop" hidden><button data-qa="vacancy-response-letter-toggle" onclick="this.nextElementSibling.hidden = false">Добавить сопроводительное</button>
+    <textarea data-qa="vacancy-response-popup-form-letter-input" hidden></textarea><button id="send">Отправить</button></div>`;
   if (/^\/vacancy\/\d+$/.test(p)) return `<!doctype html><meta charset="utf-8"><h1>Вакансия</h1><div data-qa="vacancy-description"><p>Описание вакансии ${p}. Python, Docker.</p></div>`;
   if (p === '/avito') return Number(u.searchParams.get('p') || 1) >= 2 ? fx('avito-page2.html') : fx('avito.html');
   if (p.startsWith('/moskva/vakansii/python')) return fx('avito-item.html');
@@ -57,6 +62,8 @@ function route(url) {
 
 const hits = [];
 const tgNotify = []; // что расширение отправило «боту»
+const adEvents = []; // счётчики баннеров, пришедшие на сервер
+let diskBlob = null; // «Яндекс Диск»
 const server = http.createServer((req, res) => {
   hits.push(req.url);
   // Сервер Telegram-бота (bot/): привязка и уведомления.
@@ -68,6 +75,7 @@ const server = http.createServer((req, res) => {
       if (req.url.startsWith('/api/link-status')) return json(200, { linked: true, name: 'Иван' });
       if (req.url.startsWith('/api/notify')) { tgNotify.push(JSON.parse(body)); return json(200, { ok: true }); }
       if (req.url.startsWith('/api/unlink')) return json(200, { ok: true });
+      if (req.url.startsWith('/api/ad-events')) { adEvents.push(JSON.parse(body).events); return json(200, { ok: true }); }
       return json(404, { error: 'not found' });
     });
     return;
@@ -80,6 +88,21 @@ const server = http.createServer((req, res) => {
       const ok = req.method === 'POST' && body.includes('"T_CAREER"') && body.includes('"generatedGraphQL"');
       res.writeHead(ok ? 200 : 400, { 'content-type': 'application/json' });
       res.end(ok ? fx('tbank-api.json') : '{"error":"bad request"}');
+    });
+    return;
+  }
+  // Яндекс Диск (REST API) в памяти.
+  if (req.url.startsWith('/disk')) {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      const json = (code, obj) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)); };
+      if (req.headers.authorization && req.headers.authorization !== 'OAuth test-token') return json(401, {});
+      if (req.url.startsWith('/disk/resources/upload')) return json(200, { href: `${base}/disk-blob`, method: 'PUT' });
+      if (req.url.startsWith('/disk/resources/download')) return diskBlob ? json(200, { href: `${base}/disk-blob` }) : json(404, {});
+      if (req.url === '/disk-blob' && req.method === 'PUT') { diskBlob = body; return json(201, {}); }
+      if (req.url === '/disk-blob') { res.writeHead(diskBlob ? 200 : 404, { 'content-type': 'application/json' }); return res.end(diskBlob || '{}'); }
+      return json(404, {});
     });
     return;
   }
@@ -103,7 +126,8 @@ manifest.host_permissions.push('http://127.0.0.1/*');
 fs.writeFileSync(path.join(extDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
 // Бот «запущен» на локальном сервере фикстур.
 const cfgPath = path.join(extDir, 'config.js');
-fs.writeFileSync(cfgPath, fs.readFileSync(cfgPath, 'utf8').replace("botUsername: ''", "botUsername: 'solk_test_bot'").replace("botApi: ''", `botApi: '${base}'`));
+fs.writeFileSync(cfgPath, fs.readFileSync(cfgPath, 'utf8').replace("botUsername: ''", "botUsername: 'solk_test_bot'").replace("botApi: ''", `botApi: '${base}'`)
+  .replace("clientId: ''", "clientId: 'test-client'").replace("apiBase: 'https://cloud-api.yandex.net/v1/disk'", `apiBase: '${base}/disk'`));
 
 const { chromium } = await loadPlaywright();
 
@@ -494,18 +518,26 @@ try {
     await page.keyboard.press('Escape');
     await until(() => page.locator('#appliedTile .mini-title').allTextContents().then((t) => t.includes(title)), 5000, 'вакансия в «Мои отклики»');
     assert.match(await page.locator('#appliedTile .mini-sub').first().textContent(), /Откликнулся · ждёт ответа 0 дн/);
-    // Всё, кроме «Не смотрел» и «Просмотрел», — в «Моих откликах»; «Просмотрел» — нет.
+    // «Отказ» — в «Моих откликах»; «Скрыто» и «Просмотрел» — нет.
     await page.evaluate(() => { location.hash = 'all'; });
     await page.waitForSelector('.drawer.open.dk-all .vc');
     const second = page.locator('#drawerBody .vc.st-new').first();
     const t2 = await second.locator('h3 a').textContent();
-    await second.locator('select').selectOption('hidden');
+    await second.locator('select').selectOption('rejected');
     await page.keyboard.press('Escape');
-    await until(() => page.locator('#appliedTile .mini-title').allTextContents().then((t) => t.includes(t2)), 5000, '«Скрыто» в «Мои отклики»');
+    await until(() => page.locator('#appliedTile .mini-title').allTextContents().then((t) => t.includes(t2)), 5000, '«Отказ» в «Мои отклики»');
+    await page.evaluate(() => { location.hash = 'all'; });
+    await page.waitForSelector('.drawer.open.dk-all .vc');
+    const third = page.locator('#drawerBody .vc.st-new').first();
+    const t3 = await third.locator('h3 a').textContent();
+    await third.locator('select').selectOption('hidden');
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(1200);
+    assert.ok(!(await page.locator('#appliedTile .mini-title').allTextContents()).includes(t3), '«Скрыто» не в «Моих откликах»');
     await page.evaluate(() => { location.hash = 'applied'; });
     await page.waitForSelector('.drawer.open.dk-applied .vc');
     assert.deepEqual(await page.locator('#drawerBody .tabs-row .tab').evaluateAll((els) => els.map((e) => e.textContent.split(' · ')[0])),
-      ['Откликнулся', 'Отправил резюме', 'Интервью', 'Оффер', 'Отказ', 'Скрыто']);
+      ['Откликнулся', 'Отправил резюме', 'Интервью', 'Оффер', 'Отказ']);
     await page.locator('#drawerBody .vc', { hasText: t2 }).locator('select').selectOption('viewed');
     await page.keyboard.press('Escape');
     await until(async () => (await page.locator('#appliedTile .mini-title').count()) === 1, 5000, '«Просмотрел» ушёл из откликов');
@@ -758,6 +790,95 @@ try {
     page.on('dialog', acceptAll);
     assert.equal(asked, 2, 'два подтверждения');
     assert.equal((await storage(page)).activeProfile, 'p1');
+    await page.keyboard.press('Escape');
+  });
+
+  await step('отклик в один клик: письмо по шаблону, вакансия открыта, статус «Откликнулся»', async () => {
+    // Контакты для подписи — в настройках писем.
+    await page.evaluate(() => { location.hash = 'search'; });
+    const sec = page.locator('.drawer.open .dsec', { hasText: 'Сопроводительные письма' });
+    await sec.waitFor();
+    await sec.locator('textarea').nth(1).fill('+7 900 000-00-00 · t.me/ivan');
+    await sec.locator('button', { hasText: 'Сохранить шаблоны' }).click();
+    await until(async () => (await storage(page)).letters?.contacts === '+7 900 000-00-00 · t.me/ivan', 5000, 'контакты сохранены');
+    // Окно «Письмо»: данные вакансии и профиля подставлены.
+    await page.evaluate(() => { location.hash = 'all'; });
+    await page.waitForSelector('.drawer.open.dk-all .vc.st-new');
+    const card = page.locator('#drawerBody .vc.st-new').first();
+    const title = await card.locator('h3 a').textContent();
+    await card.locator('button', { hasText: 'Письмо' }).click();
+    const letter = await page.locator('dialog.letter-dialog textarea').inputValue();
+    assert.ok(letter.includes(`«${title}»`) && letter.includes('Иван') && letter.includes('t.me/ivan'), letter);
+    assert.ok(!/[{}]/.test(letter), 'нет пустых подстановок');
+    await page.locator('dialog.letter-dialog button', { hasText: '✕' }).click();
+    // «Откликнуться»: новая вкладка с вакансией и статус «Откликнулся».
+    const url = await card.locator('h3 a').getAttribute('href');
+    const [tab] = await Promise.all([context.waitForEvent('page'), card.locator('button', { hasText: 'Откликнуться' }).click()]);
+    await until(() => tab.url() === url, 8000, 'вакансия открыта');
+    await tab.close();
+    await until(async () => Object.entries(await storage(page)).some(([k, u]) => k.startsWith('u:') && u.status === 'responded' && k.endsWith(url.split('/').pop())), 5000, 'статус «Откликнулся»');
+    // hh.ru: расширение нажимает «Откликнуться» и вставляет письмо, отправку оставляет человеку.
+    const r = await page.evaluate((u) => chrome.runtime.sendMessage({ type: 'respondAssist', url: u, platform: 'hh', letter: 'Здравствуйте! Тестовое письмо.' }), `${base}/vacancy/777`);
+    assert.equal(r.prefill, 'filled', JSON.stringify(r));
+    const hhTab = context.pages().find((p) => p.url().endsWith('/vacancy/777'));
+    assert.equal(await hhTab.locator('textarea').inputValue(), 'Здравствуйте! Тестовое письмо.');
+    await hhTab.close();
+    await page.keyboard.press('Escape');
+  });
+
+  await step('напоминания: 7 дней без ответа и интервью завтра — в «Моих откликах» и в Telegram', async () => {
+    const st = await storage(page);
+    const resp = Object.keys(st).find((k) => k.startsWith('u:') && st[k].status === 'responded');
+    const other = Object.keys(st).find((k) => k.startsWith('v:') && !st[`u${k.slice(1)}`] && !st[k].archived);
+    const tomorrow = new Date(Date.now() + 20 * 3600e3).toISOString();
+    await page.evaluate(async ([a, b, at]) => {
+      await chrome.storage.local.set({
+        [a]: { status: 'responded', statusChangedAt: new Date(Date.now() - 8 * 86400e3).toISOString() },
+        [`u${b.slice(1)}`]: { status: 'interview', statusChangedAt: new Date().toISOString(), interviewAt: at },
+      });
+    }, [resp, other, tomorrow]);
+    const before = tgNotify.length;
+    const n = await page.evaluate(() => chrome.runtime.sendMessage({ type: 'checkReminders' }));
+    assert.equal(n, 2, 'два напоминания');
+    const texts = tgNotify.slice(before).map((x) => x.title);
+    assert.ok(texts.includes('⏰ 7 дней без ответа — напишите рекрутеру'), texts.join(' | '));
+    assert.ok(texts.some((t) => /^⏰ Интервью (завтра|сегодня) в \d\d:\d\d — подготовьтесь$/.test(t)), texts.join(' | '));
+    assert.equal(await page.evaluate(() => chrome.runtime.sendMessage({ type: 'checkReminders' })), 0, 'повторно не напоминает');
+    await page.evaluate(() => { location.hash = 'applied'; });
+    await page.locator('.drawer.open .reminders', { hasText: '7 дней без ответа' }).waitFor();
+    assert.ok(await page.locator('#drawerBody .vc.st-interview input[type=datetime-local]').count(), 'поле даты интервью');
+    await page.keyboard.press('Escape');
+  });
+
+  await step('баннеры: показы и клики считаются и уходят на сервер общими числами', async () => {
+    await page.waitForSelector('.t-partners .pb');
+    const [tab] = await Promise.all([context.waitForEvent('page'), page.locator('.t-partners .pb').click()]);
+    await tab.close().catch(() => {});
+    await until(() => adEvents.length > 0, 5000, 'счётчики на сервере');
+    const ev = adEvents.at(-1);
+    const ids = Object.keys(ev);
+    assert.ok(ids.every((id) => /^[\w-]+$/.test(id)) && Object.values(ev).some((r) => r.click === 1) && Object.values(ev).every((r) => r.view >= 0), JSON.stringify(ev));
+    assert.ok(!JSON.stringify(ev).includes('Иван'), 'никаких данных пользователя');
+  });
+
+  await step('Яндекс Диск: копия и восстановление на «новом компьютере»', async () => {
+    await page.evaluate(() => chrome.storage.local.set({ cloud: { token: 'test-token', connectedAt: new Date().toISOString() } }));
+    await page.evaluate(() => { location.hash = 'search'; });
+    const sec = page.locator('.drawer.open .dsec', { hasText: 'Резервная копия на Яндекс Диске' });
+    await sec.locator('button', { hasText: 'Сохранить сейчас' }).click();
+    await until(() => diskBlob, 5000, 'копия на Диске');
+    const backup = JSON.parse(diskBlob);
+    const vacs = Object.keys(backup.data).filter((k) => k.startsWith('v:')).length;
+    assert.ok(backup.app === 'solk-job' && vacs > 10 && !('cloud' in backup.data), 'копия без токена');
+    await sec.locator('p', { hasText: 'Последняя копия' }).waitFor();
+    // «Новый компьютер»: данные пропали — восстанавливаем одной кнопкой.
+    await page.evaluate(async () => {
+      const all = await chrome.storage.local.get(null);
+      await chrome.storage.local.remove(Object.keys(all).filter((k) => k.startsWith('v:') || k.startsWith('u:') || k === 'profile'));
+    });
+    await sec.locator('button', { hasText: 'Восстановить из облака' }).click();
+    await until(async () => Object.keys(await storage(page)).filter((k) => k.startsWith('v:')).length === vacs, 8000, 'вакансии вернулись');
+    assert.equal((await storage(page)).profile.name, 'Иван');
     await page.keyboard.press('Escape');
   });
 

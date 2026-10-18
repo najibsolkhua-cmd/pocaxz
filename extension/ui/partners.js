@@ -16,6 +16,7 @@
 
 import { CONFIG } from '../config.js';
 import { h } from './dom.js';
+import { countAd, flushAdStats } from '../lib/adstats.js';
 
 // Встроенные примеры: показываются, пока на сайте нет partners.json. Реальных брендов здесь нет.
 export const SAMPLE_BANNERS = [
@@ -79,7 +80,12 @@ export function createPartnerTile(root) {
     const style = b.image
       ? { backgroundImage: `linear-gradient(180deg, rgba(0,0,0,.05) 30%, rgba(0,0,0,.65)), url("${encodeURI(b.image)}")`, color: '#fff' }
       : { background: b.bg || '#7d5a5a', color: b.color || '#fff' };
-    const ad = h('a', { class: 'pb', href: b.url, target: '_blank', rel: 'sponsored noopener', style, 'data-id': b.id, onclick: (e) => e.stopPropagation() },
+    // Показ засчитываем, только если вкладка на экране.
+    if (document.visibilityState === 'visible') countAd(b.id, 'view');
+    const ad = h('a', { class: 'pb', href: b.url, target: '_blank', rel: 'sponsored noopener', style, 'data-id': b.id, onclick: (e) => {
+      e.stopPropagation();
+      countAd(b.id, 'click').then(() => flushAdStats({ force: true }));
+    } },
       h('span', { class: 'pb-mark' }, `Реклама · ${b.advertiser}${b.erid ? ` · erid: ${b.erid}` : ''}`),
       h('span', { class: 'pb-body' },
         h('b', { class: 'pb-title' }, b.title),

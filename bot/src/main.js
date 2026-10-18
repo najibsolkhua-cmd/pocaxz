@@ -17,7 +17,7 @@ const tg = createTelegram(config.telegramToken);
 const answerer = createAnswerer({ ...config, knowledge: loadKnowledge(config) });
 const bot = createBot({ tg, store, answerer, config });
 
-createApi({ store, tg, notifyPerHour: config.notifyPerHour }).listen(config.port, () => {
+createApi({ store, tg, notifyPerHour: config.notifyPerHour, statsKey: config.statsKey }).listen(config.port, () => {
   console.log(`API: http://0.0.0.0:${config.port} · ответы: ${answerer.mode === 'claude' ? `Claude (${config.model})` : 'база знаний без ИИ'}`);
 });
 

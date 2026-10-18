@@ -37,6 +37,10 @@ export function search(secs, question, limit = 2) {
     const counts = new Map();
     body.forEach((w) => counts.set(w, (counts.get(w) || 0) + 1));
     const score = q.reduce((n, w) => n + (title.has(w) ? 3 : 0) + Math.min(3, counts.get(w) || 0), 0);
-    return { ...s, score };
+    // Одно случайное совпадение («завтра», «Москва») — не ответ: нужны два слова вопроса
+    // или слово из заголовка раздела.
+    const hits = q.filter((w) => title.has(w) || counts.has(w)).length;
+    const titleHit = q.some((w) => title.has(w));
+    return { ...s, score: hits >= Math.min(2, q.length) || titleHit ? score : 0 };
   }).filter((s) => s.score > 0).sort((a, b) => b.score - a.score).slice(0, limit);
 }

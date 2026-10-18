@@ -7,6 +7,9 @@ import { normalizeItem, dedupKey } from './lib/parse.js';
 import { scoreAll } from './lib/match.js';
 import { siteApiFor, readSiteApi } from './lib/sites.js';
 import { sendToTelegram } from './lib/telegram.js';
+import { dueReminders, pruneSent } from './lib/reminders.js';
+import { flushAdStats } from './lib/adstats.js';
+import { backupNow } from './lib/cloud.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const rand = (a, b) => a + Math.random() * (b - a);
@@ -31,7 +34,31 @@ chrome.runtime.onInstalled.addListener(async ({ reason }) => {
   scheduleBadge();
 });
 chrome.runtime.onStartup.addListener(setupAlarm);
-chrome.alarms.onAlarm.addListener((a) => { if (a.name === 'tick') tick().catch(console.error); });
+chrome.runtime.onStartup.addListener(() => { checkReminders().catch(() => {}); });
+chrome.alarms.onAlarm.addListener((a) => {
+  if (a.name !== 'tick') return;
+  // Напоминания — всегда, даже если автопоиск выключен.
+  checkReminders().catch(console.error);
+  flushAdStats().catch(() => {});
+  backupNow().catch(() => {}); // автокопия на Яндекс Диск, если подключён и пора
+  tick().catch(console.error);
+});
+
+// Напоминания о следующем шаге: в браузере и в Telegram, каждое — один раз.
+async function checkReminders() {
+  const settings = await store.getSettings();
+  if (settings.reminders === false) return;
+  const { remindersSent } = await chrome.storage.local.get('remindersSent');
+  const sent = pruneSent(remindersSent);
+  const due = dueReminders(await store.getVacancies(), { sent });
+  for (const r of due.slice(0, 5)) {
+    notify(`rem:${r.id}`, `⏰ ${r.text}`, [r.title, r.company].filter(Boolean).join(' — '), r.url);
+    await sendToTelegram(`⏰ ${r.text}`, [{ title: r.title, company: r.company, url: r.url }]).catch(() => {});
+    sent[r.id] = new Date().toISOString();
+  }
+  await chrome.storage.local.set({ remindersSent: sent });
+  return due.length;
+}
 
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'local') return;
@@ -117,6 +144,8 @@ async function runQueue(due, settings) {
       progress.done++;
     }
     if (!stopRequested) await cleanup(settings);
+    // После поиска — свежая копия на Яндекс Диск (если подключён; не чаще autoHours).
+    if (!stopRequested) backupNow().catch(() => {});
   } finally {
     running = false;
     current = null;
@@ -811,6 +840,44 @@ async function collectFromTab(tabId) {
   return { ...stats, detailed, total: res.total, platform: res.platform, blocked: res.blocked, reason: res.reason, error: res.error };
 }
 
+// «Откликнуться»: открываем вакансию. На hh.ru нажимаем кнопку «Откликнуться» и вставляем
+// сопроводительное письмо в форму — отправку письма подтверждает сам человек.
+async function respondAssist({ url, letter, platform }) {
+  if (!/^https?:\/\//i.test(url || '')) return { opened: false };
+  const tab = await chrome.tabs.create({ url, active: true });
+  if (platform !== 'hh' || !letter) return { opened: true };
+  try {
+    await waitTabComplete(tab.id);
+    const [r] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: hhPrefillLetter, args: [letter] });
+    return { opened: true, prefill: r?.result };
+  } catch (e) {
+    return { opened: true, prefill: `error: ${e.message}` };
+  }
+}
+
+// Выполняется на странице вакансии hh.ru.
+async function hhPrefillLetter(letter) {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const q = (s) => document.querySelector(s);
+  const LETTER = '[data-qa="vacancy-response-popup-form-letter-input"], textarea[name="letter"]';
+  const button = q('[data-qa="vacancy-response-link-top"]') || [...document.querySelectorAll('a, button')].find((b) => /^откликнуться$/i.test(b.textContent.trim()));
+  if (!button) return 'no-button';
+  button.click();
+  for (let i = 0; i < 40; i++) {
+    await sleep(300);
+    if (!q(LETTER)) q('[data-qa="vacancy-response-letter-toggle"]')?.click();
+    const area = q(LETTER);
+    if (area) {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(area, letter);
+      area.dispatchEvent(new Event('input', { bubbles: true }));
+      area.dispatchEvent(new Event('change', { bubbles: true }));
+      area.focus();
+      return 'filled';
+    }
+  }
+  return 'no-form';
+}
+
 // Пример подходящей вакансии для профиля: открываем ссылку и читаем её текст.
 async function inspectUrl(url) {
   const settings = await store.getSettings();
@@ -849,6 +916,8 @@ const handlers = {
   }),
   collectTab: ({ tabId }) => collectFromTab(tabId),
   inspectUrl: ({ url }) => inspectUrl(url),
+  respondAssist: (msg) => respondAssist(msg),
+  checkReminders: () => checkReminders(),
   async addSource({ url, name, platform }) {
     const sources = await store.getSources();
     const src = store.makeSource(url, { name, platform });

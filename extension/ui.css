@@ -576,3 +576,19 @@ body.popup { width: 330px; padding: 14px; }
 /* Статус «Откликнулся» */
 .status-sel.st-responded { background: #e8f1ff; }
 @container (max-width: 520px) { .limit input#limitInput { width: 15cqw; } }
+
+/* Отклик и письма */
+.vc-respond { white-space: nowrap; }
+.letter-dialog { width: min(720px, calc(100vw - 32px)); border: 0; border-radius: 24px; padding: 0; box-shadow: 0 30px 80px -30px rgba(0, 0, 0, .5); }
+.letter-dialog::backdrop { background: rgba(23, 24, 27, .45); }
+.letter-form { display: grid; gap: 12px; padding: 22px 24px; }
+.letter-head { display: flex; justify-content: space-between; gap: 12px; align-items: center; font-size: 17px; }
+.letter-text { width: 100%; box-sizing: border-box; font: 400 15px/1.5 Manrope, sans-serif; padding: 12px 14px; border: 1px solid var(--line); border-radius: 14px; resize: vertical; }
+
+/* Напоминания */
+.vc-remind { margin-top: 6px; font-size: 13px; font-weight: 700; color: #8a4b00; }
+.vc-iv { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; font-size: 13px; font-weight: 600; }
+.vc-iv input { font: inherit; padding: 4px 8px; border: 1px solid var(--line); border-radius: 10px; }
+.reminders { background: #fff4c2; border-radius: 18px; padding: 14px 18px; margin-bottom: 14px; }
+.reminders h3 { margin: 0 0 6px; font-size: 16px; }
+.reminders ul { margin: 0; padding-left: 0; list-style: none; display: grid; gap: 4px; font-size: 14px; }

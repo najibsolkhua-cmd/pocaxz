@@ -4,7 +4,9 @@
 import * as store from './lib/store.js';
 import { DEFAULT_PROFILE, scoreAll, profileSkills, exclusionStats } from './lib/match.js';
 import { $, h, logo, fmtTime, daysSince, plural, download } from './ui/dom.js';
-import { createVacancyList } from './ui/vacancies.js';
+import { createVacancyList, setCardContext } from './ui/vacancies.js';
+import { DEFAULT_TEMPLATES } from './lib/letters.js';
+import { remindersFor } from './lib/reminders.js';
 import { renderProfile } from './ui/profile.js';
 import { sourceRows, addSourceForm } from './ui/sources.js';
 import { makeZip } from './lib/zip.js';
@@ -12,6 +14,7 @@ import { createAdSlot } from './ui/ads.js';
 import { supportLink } from './config.js';
 import * as tg from './lib/telegram.js';
 import { createPartnerTile } from './ui/partners.js';
+import * as cloud from './lib/cloud.js';
 
 const send = (msg) => chrome.runtime.sendMessage(msg);
 const PLATFORMS = ['avito', 'generic', 'telegram', 'hh'];
@@ -35,6 +38,8 @@ async function loadState() {
   state.sources = all.sources || [];
   state.resume = all.resume || null;
   state.scored = scoreAll(store.vacanciesFrom(all), state.profile, state.resume?.text || '');
+  state.letters = { templates: all.letters?.templates?.length ? all.letters.templates : DEFAULT_TEMPLATES, defaultId: all.letters?.defaultId || 'short', contacts: all.letters?.contacts || '' };
+  setCardContext({ profile: state.profile, letters: state.letters });
 }
 
 const isLive = (v) => !['hidden', 'rejected'].includes(v.status);
@@ -292,7 +297,7 @@ function renderSearchTile() {
     h('dt', {}, 'Авто-поиск'), h('dd', {}, !auto ? 'выключен' : !state.all.autoArmed && !runs.length ? 'включится после первого поиска' : next ? `следующий ${fmtTime(next)}` : 'включён')));
 }
 
-// «Мои отклики»: всё, кроме «Не смотрел» и «Просмотрел», свежие изменения сверху.
+// «Мои отклики»: всё, кроме «Не смотрел», «Просмотрел» и «Скрыто», свежие изменения сверху.
 function renderAppliedTile() {
   const rows = state.scored.filter(({ v }) => store.MY_STATUSES.includes(v.status))
     .sort((a, b) => Date.parse(b.v.statusChangedAt || 0) - Date.parse(a.v.statusChangedAt || 0));
@@ -300,7 +305,8 @@ function renderAppliedTile() {
     ? h('ul', { class: 'mini-list plain' }, rows.slice(0, 8).map(({ v }) => {
       const d = daysSince(v.statusChangedAt);
       const waiting = store.WAITING_STATUSES.includes(v.status);
-      const note = waiting ? `${STATUS_LABEL[v.status]} · ${d >= 7 ? `ждёт ответа ${d} дн — напомните о себе` : `ждёт ответа ${d ?? 0} дн`}` : STATUS_LABEL[v.status];
+      const note = waiting ? `${STATUS_LABEL[v.status]} · ${d >= 7 ? `ждёт ответа ${d} дн — напомните о себе` : `ждёт ответа ${d ?? 0} дн`}`
+        : v.status === 'interview' && v.interviewAt ? `Интервью ${fmtTime(v.interviewAt)}` : STATUS_LABEL[v.status];
       return h('li', {}, h('a', { href: v.url, target: '_blank', rel: 'noopener', onclick: (e) => e.stopPropagation() },
         h('span', { class: 'mini-title' }, v.title),
         h('span', { class: `mini-sub ${waiting && d >= 7 ? 'late' : ''}` }, [v.company, note].filter(Boolean).join(' · '))));
@@ -350,7 +356,7 @@ function openDrawer(kind) {
   if (def.platform) buildPlatformDrawer(body, def.platform);
   else if (kind === 'profile') buildProfileDrawer(body);
   else if (kind === 'all') buildListDrawer(body, { showStatusTabs: true, showPlatform: true, funnel: true });
-  else if (kind === 'applied') buildListDrawer(body, { statuses: store.MY_STATUSES, showStatusTabs: true, showPlatform: true });
+  else if (kind === 'applied') buildListDrawer(body, { statuses: store.MY_STATUSES, showStatusTabs: true, showPlatform: true, reminders: true });
   else if (kind === 'search') buildSearchDrawer(body);
 }
 
@@ -362,19 +368,26 @@ function closeDrawer() {
   drawer = null;
 }
 
-function buildListDrawer(body, { funnel = false, ...opts }) {
+function buildListDrawer(body, { funnel = false, reminders = false, ...opts }) {
   const list = createVacancyList({ ...opts, matchScore: state.settings.matchScore });
   const excl = h('div', {});
   const stats = funnel ? h('div', { class: 'stats' }) : null;
-  body.replaceChildren(...[stats, excl, list.el].filter(Boolean));
+  const remBox = reminders ? h('div', { class: 'reminders' }) : null;
+  body.replaceChildren(...[stats, remBox, excl, list.el].filter(Boolean));
   drawer.refresh = () => {
+    if (remBox) {
+      // Что сделать дальше — по всем откликам сразу.
+      const all = state.scored.flatMap(({ v }) => remindersFor(v).map((r) => ({ r, v })));
+      remBox.replaceChildren(...(all.length ? [h('h3', {}, 'Следующие шаги'), h('ul', {}, all.map(({ r, v }) => h('li', {},
+        `⏰ ${r.text}: `, h('a', { href: v.url, target: '_blank', rel: 'noopener' }, v.title), v.company ? ` — ${v.company}` : '')))] : []));
+    }
     if (stats) {
       // Воронка — здесь же, над списком: сколько подходит и что с ними дальше.
       const f = funnelCounts();
       stats.replaceChildren(
         stat(f.good, 'подходят вам', `С оценкой «Подходит мне» от ${Math.round(state.settings.matchScore * 100)}%`),
         stat(f.unseen, 'ещё не смотрел'),
-        stat(f.mine, 'в «Моих откликах»', 'Всё, кроме «Не смотрел» и «Просмотрел»'),
+        stat(f.mine, 'в «Моих откликах»', 'Всё, кроме «Не смотрел», «Просмотрел» и «Скрыто»'),
         stat(f.interview + f.offer, 'интервью и офферы'));
     }
     excl.replaceChildren(exclusionLine(state.scored));
@@ -456,6 +469,7 @@ function buildSearchDrawer(body) {
   const match = h('input', { type: 'number', min: 10, max: 95, step: 5, value: Math.round(s.matchScore * 100) });
   const notify = h('input', { type: 'number', min: 0, max: 100, step: 5, value: Math.round(s.notifyScore * 100) });
   const retention = h('input', { type: 'number', min: 0, max: 3650, value: s.retentionDays || 0, title: '0 — никогда не удалять' });
+  const remind = h('input', { type: 'checkbox', checked: s.reminders !== false });
   const saved = h('span', { class: 'muted small' });
 
   const settingsForm = h('form', { class: 'settings', onsubmit: async (e) => {
@@ -468,12 +482,14 @@ function buildSearchDrawer(body) {
       matchScore: Math.min(0.95, Math.max(0.1, (Number(match.value) || 50) / 100)),
       notifyScore: (Number(notify.value) || 0) / 100,
       retentionDays: Math.max(0, Number(retention.value) || 0),
+      reminders: remind.checked,
     });
     saved.textContent = 'Сохранено';
     setTimeout(() => { saved.textContent = ''; }, 2500);
   } },
   h('label', { class: 'check' }, auto, 'Искать автоматически, пока открыт браузер'),
   h('label', { class: 'check' }, locked, 'Не искать, когда экран заблокирован'),
+  h('label', { class: 'check' }, remind, 'Напоминать о следующем шаге: нет ответа 7 дней, интервью завтра, оффер ждёт ответа (в браузере и в Telegram)'),
   h('div', { class: 'grid3' },
     h('div', { class: 'field' }, h('span', { class: 'field-label' }, 'Открывать сайты'), openIn),
     h('div', { class: 'field' }, h('span', { class: 'field-label' }, 'Вакансия «подходит» с оценки, %'), match),
@@ -503,6 +519,8 @@ function buildSearchDrawer(body) {
   body.replaceChildren(
     h('section', { class: 'dsec' }, h('h3', {}, 'Как искать'), settingsForm),
     h('section', { class: 'dsec' }, h('h3', {}, 'Все источники'), srcBox),
+    lettersSection(),
+    cloudSection(),
     telegramSection(),
     shareSection(),
     h('section', { class: 'dsec' }, h('h3', {}, 'Данные'),
@@ -533,6 +551,96 @@ function buildSearchDrawer(body) {
       : [h('tr', {}, h('td', { colspan: 6, class: 'empty' }, 'Поиска ещё не было.'))]));
   };
   drawer.refresh();
+}
+
+// Резервная копия на Яндекс Диске: данные сами переезжают на новый компьютер.
+function cloudSection() {
+  const status = h('p', { class: 'muted small' });
+  const actions = h('div', { class: 'row' });
+  const sec = h('section', { class: 'dsec' }, h('h3', {}, 'Резервная копия на Яндекс Диске'), status, actions);
+  const busy = async (btn, fn) => {
+    const label = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Подождите…';
+    try { await fn(); } catch (e) { toast(e.message || String(e)); } finally { btn.disabled = false; btn.textContent = label; draw(); }
+  };
+  const restore = async (backup) => {
+    if (!backup) return toast('На Яндекс Диске ещё нет копии');
+    if (!confirm(`Восстановить данные из копии от ${fmtTime(backup.at)}? Совпадающие данные в этом браузере заменятся.`)) return;
+    await cloud.restoreNow();
+    toast('Данные восстановлены из Яндекс Диска');
+  };
+  async function draw() {
+    if (!cloud.cloudEnabled()) {
+      status.textContent = 'Скоро: профиль, резюме, вакансии и отклики будут сами сохраняться на ваш Яндекс Диск и переезжать на новый компьютер.';
+      actions.replaceChildren(h('button', { class: 'btn', type: 'button', disabled: true }, 'Подключить Яндекс Диск'));
+      return;
+    }
+    const c = await cloud.getCloud();
+    if (!c?.token) {
+      status.textContent = 'Подключите Яндекс Диск — копия будет сохраняться сама после поиска, а на новом компьютере всё восстановится одной кнопкой. Доступ только к папке «Приложения/solk-job».';
+      const btn = h('button', { class: 'btn primary', type: 'button', onclick: () => busy(btn, async () => {
+        await cloud.authorize();
+        const remote = await cloud.download((await cloud.getCloud()).token).catch(() => null);
+        if (remote && !Object.keys(state.all).some((k) => k.startsWith('v:'))) await restore(remote);
+        else await cloud.backupNow({ force: true });
+        toast('Яндекс Диск подключён');
+      }) }, 'Подключить Яндекс Диск');
+      actions.replaceChildren(btn);
+      return;
+    }
+    status.textContent = `Подключено. ${c.lastBackupAt ? `Последняя копия: ${fmtTime(c.lastBackupAt)}.` : 'Копии ещё не было.'} Копия сохраняется сама после поиска.${c.lastError ? ` Ошибка: ${c.lastError}` : ''}`;
+    const save = h('button', { class: 'btn', type: 'button', onclick: () => busy(save, async () => { await cloud.backupNow({ force: true }); toast('Копия сохранена на Яндекс Диск'); }) }, 'Сохранить сейчас');
+    const load = h('button', { class: 'btn', type: 'button', onclick: () => busy(load, async () => restore(await cloud.download(c.token))) }, 'Восстановить из облака');
+    actions.replaceChildren(save, load, h('button', { class: 'btn ghost', type: 'button', onclick: async () => { await cloud.disconnect(); draw(); } }, 'Отключить'));
+  }
+  draw();
+  return sec;
+}
+
+// Шаблоны сопроводительных писем для кнопки «Откликнуться».
+function lettersSection() {
+  const L = structuredClone(state.letters);
+  let cur = L.templates.find((t) => t.id === L.defaultId) || L.templates[0];
+  const saved = h('span', { class: 'muted small' });
+  const pick = h('select', {});
+  const name = h('input', { placeholder: 'Название шаблона' });
+  const text = h('textarea', { rows: 12, class: 'letter-text' });
+  const def = h('input', { type: 'checkbox' });
+  const contacts = h('textarea', { rows: 2, placeholder: 'Телефон, Telegram, почта — подставятся в {контакты}' }, L.contacts);
+  const draw = () => {
+    pick.replaceChildren(...L.templates.map((t) => h('option', { value: t.id, selected: t.id === cur.id }, `${t.name}${t.id === L.defaultId ? ' (по умолчанию)' : ''}`)));
+    name.value = cur.name;
+    text.value = cur.text;
+    def.checked = cur.id === L.defaultId;
+  };
+  const pull = () => { cur.name = name.value.trim() || 'Без названия'; cur.text = text.value; if (def.checked) L.defaultId = cur.id; L.contacts = contacts.value; };
+  pick.addEventListener('change', () => { pull(); cur = L.templates.find((t) => t.id === pick.value); draw(); });
+  draw();
+  const save = async () => {
+    pull();
+    await store.saveLetters(L);
+    saved.textContent = 'Сохранено';
+    setTimeout(() => { saved.textContent = ''; }, 2500);
+    draw();
+  };
+  return h('section', { class: 'dsec' }, h('h3', {}, 'Сопроводительные письма'),
+    h('p', { class: 'muted small' }, 'Кнопка «Откликнуться» у вакансии берёт шаблон по умолчанию и подставляет данные: {вакансия} {компания} {имя} {должность} {навыки} — совпавшие с вакансией, {опыт} — первое предложение «Чем я занимаюсь», {контакты}. Фрагмент в [[двойных скобках]] пропадает, если в нём пустая подстановка.'),
+    h('div', { class: 'row' }, pick,
+      h('button', { class: 'btn small', type: 'button', onclick: () => { pull(); cur = { id: `t${Date.now().toString(36)}`, name: 'Новый шаблон', text: DEFAULT_TEMPLATES[0].text }; L.templates.push(cur); draw(); } }, '+ Шаблон'),
+      h('button', { class: 'btn small ghost', type: 'button', onclick: () => {
+        if (L.templates.length < 2) return toast('Нужен хотя бы один шаблон');
+        if (!confirm(`Удалить шаблон «${cur.name}»?`)) return;
+        L.templates = L.templates.filter((t) => t !== cur);
+        if (L.defaultId === cur.id) L.defaultId = L.templates[0].id;
+        cur = L.templates[0];
+        draw();
+      } }, 'Удалить')),
+    h('div', { class: 'field' }, h('span', { class: 'field-label' }, 'Название'), name),
+    text,
+    h('label', { class: 'check' }, def, 'Использовать по умолчанию'),
+    h('div', { class: 'field' }, h('span', { class: 'field-label' }, 'Контакты для подписи'), contacts),
+    h('div', { class: 'savebar' }, h('button', { class: 'btn primary', type: 'button', onclick: save }, 'Сохранить шаблоны'), saved));
 }
 
 // Уведомления о новых подходящих вакансиях в Telegram (через бота solk / job).
@@ -743,6 +851,7 @@ function bind() {
   });
   $('supportLink').addEventListener('click', (e) => e.stopPropagation());
   document.querySelector('.brand-link').addEventListener('click', (e) => e.stopPropagation());
+  window.addEventListener('solk-toast', (e) => toast(e.detail));
   // Плитки со списками подстраиваются под размер окна: без обрезанных строк.
   let fitTimer;
   window.addEventListener('resize', () => { clearTimeout(fitTimer); fitTimer = setTimeout(() => { renderTopTile(); renderAppliedTile(); }, 150); });
