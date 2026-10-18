@@ -5,6 +5,8 @@
   "scripts": {
     "files": "node scripts/gen-files.mjs",
     "test": "node --test tests/unit/*.test.js",
-    "test:e2e": "xvfb-run -a node tests/e2e/run.mjs"
+    "test:e2e": "xvfb-run -a node tests/e2e/run.mjs",
+    "pack": "node scripts/gen-files.mjs && node scripts/pack.mjs",
+    "test:bot": "cd bot && npm test"
   }
 }

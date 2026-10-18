@@ -1,5 +1,6 @@
 [
  "background.js",
+ "config.js",
  "dashboard.html",
  "dashboard.js",
  "extractors/page.js",
@@ -34,6 +35,7 @@
  "lib/sites.js",
  "lib/skills.js",
  "lib/store.js",
+ "lib/telegram.js",
  "lib/zip.js",
  "manifest.json",
  "offscreen.html",
@@ -41,6 +43,7 @@
  "popup.html",
  "popup.js",
  "ui.css",
+ "ui/ads.js",
  "ui/dom.js",
  "ui/profile.js",
  "ui/sources.js",

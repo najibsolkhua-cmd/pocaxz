@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180.47 172.99">
+  <defs>
+    <style>
+      .avito-1 {
+        fill: #f53d52;
+      }
+
+      .avito-1, .avito-2, .avito-3, .avito-4 {
+        stroke-width: 0px;
+      }
+
+      .avito-2 {
+        fill: #00a3f5;
+      }
+
+      .avito-3 {
+        fill: #05d75e;
+      }
+
+      .avito-4 {
+        fill: #915ae2;
+      }
+    </style>
+  </defs>
+  <circle class="avito-2" cx="133.4" cy="49.83" r="41.13"/>
+  <circle class="avito-3" cx="56.1" cy="116" r="50.75"/>
+  <circle class="avito-4" cx="67.08" cy="37.84" r="19.12"/>
+  <circle class="avito-1" cx="145.25" cy="129.19" r="30.23"/>
+</svg>

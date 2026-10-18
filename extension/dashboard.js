@@ -8,6 +8,9 @@ import { createVacancyList } from './ui/vacancies.js';
 import { renderProfile } from './ui/profile.js';
 import { sourceRows, addSourceForm } from './ui/sources.js';
 import { makeZip } from './lib/zip.js';
+import { createAdSlot } from './ui/ads.js';
+import { supportLink } from './config.js';
+import * as tg from './lib/telegram.js';
 
 const send = (msg) => chrome.runtime.sendMessage(msg);
 const PLATFORMS = ['avito', 'generic', 'telegram', 'hh'];
@@ -164,6 +167,10 @@ function renderMain() {
   btn.classList.toggle('busy', running);
   $('stopBtn').hidden = !running;
   $('mainTile').classList.toggle('running', Boolean(running));
+  // Реклама — только пока идёт поиск, на месте часов и имени.
+  const showAd = Boolean(running) && ad.enabled;
+  $('mainTile').classList.toggle('with-ad', showAd);
+  if (showAd) ad.show(); else ad.hide();
   $('eta').hidden = !running;
   if (running) $('etaText').textContent = etaLine(progress?.etaSec);
   if (running && progress?.total) {
@@ -474,6 +481,7 @@ function buildSearchDrawer(body) {
   body.replaceChildren(
     h('section', { class: 'dsec' }, h('h3', {}, 'Как искать'), settingsForm),
     h('section', { class: 'dsec' }, h('h3', {}, 'Все источники'), srcBox),
+    telegramSection(),
     shareSection(),
     h('section', { class: 'dsec' }, h('h3', {}, 'Данные'),
       h('p', { class: 'muted small' }, 'Всё хранится только в этом браузере. Сделайте резервную копию, если переустанавливаете расширение.'),
@@ -503,6 +511,50 @@ function buildSearchDrawer(body) {
       : [h('tr', {}, h('td', { colspan: 6, class: 'empty' }, 'Поиска ещё не было.'))]));
   };
   drawer.refresh();
+}
+
+// Уведомления о новых подходящих вакансиях в Telegram (через бота solk / job).
+function telegramSection() {
+  const status = h('p', { class: 'muted small' });
+  const actions = h('div', { class: 'row' });
+  const sec = h('section', { class: 'dsec' }, h('h3', {}, 'Уведомления в Telegram'), status, actions);
+  let poll = null;
+  const draw = (link, note = '') => {
+    clearInterval(poll);
+    if (!tg.tgEnabled()) {
+      status.textContent = 'Скоро: бот solk / job будет присылать новые подходящие вакансии в Telegram и отвечать на вопросы.';
+      actions.replaceChildren(h('button', { class: 'btn', type: 'button', disabled: true }, 'Подключить Telegram'));
+      return;
+    }
+    if (link?.linked) {
+      status.textContent = `Подключено${link.name ? ` (${link.name})` : ''}: новые вакансии с оценкой от ${Math.round(state.settings.notifyScore * 100)}% придут в Telegram.${note ? ` ${note}` : ''}`;
+      actions.replaceChildren(
+        h('button', { class: 'btn', type: 'button', onclick: async () => {
+          const ok = await tg.sendToTelegram('Проверка: уведомления работают', [{ title: 'Так будет выглядеть новая вакансия', company: 'solk / job', score: 100, url: 'https://t.me' }]).catch(() => false);
+          draw(await tg.getLink(), ok ? 'Тестовое сообщение отправлено.' : 'Не получилось отправить — проверьте бота.');
+        } }, 'Отправить тест'),
+        h('button', { class: 'btn ghost', type: 'button', onclick: async () => { await tg.unlink(); draw(null); } }, 'Отключить'));
+      return;
+    }
+    status.textContent = link?.token
+      ? 'Откройте бота в Telegram и нажмите «Запустить» (Start) — подключение проверится само.'
+      : 'Новые подходящие вакансии будут приходить в Telegram. Нажмите кнопку — откроется бот, нажмите в нём «Запустить».';
+    actions.replaceChildren(h('button', { class: 'btn primary', type: 'button', onclick: async () => {
+      const url = await tg.startLink();
+      window.open(url, '_blank', 'noopener');
+      draw(await tg.getLink());
+    } }, link?.token ? 'Открыть бота ещё раз' : 'Подключить Telegram'));
+    if (link?.token) {
+      const until = Date.now() + 3 * 60e3;
+      poll = setInterval(async () => {
+        if (Date.now() > until || !sec.isConnected) { clearInterval(poll); return; }
+        const next = await tg.checkLink().catch(() => null);
+        if (next?.linked) draw(next, 'Готово!');
+      }, 3000);
+    }
+  };
+  tg.getLink().then((l) => draw(l));
+  return sec;
 }
 
 // «Поделиться»: у каждого человека своя копия расширения и свои данные.
@@ -632,7 +684,11 @@ function scheduleRefresh() {
   }, wait);
 }
 
+const ad = createAdSlot();
+
 function bind() {
+  document.querySelector('#mainTile .main-top').prepend(ad.el);
+  $('supportLink').href = supportLink();
   document.querySelectorAll('[data-logo]').forEach((el) => el.replaceChildren(logo(el.dataset.logo)));
   document.querySelectorAll('[data-open]').forEach((el) => {
     const go = (e) => {

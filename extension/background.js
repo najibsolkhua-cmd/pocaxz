@@ -6,6 +6,7 @@ import * as store from './lib/store.js';
 import { normalizeItem, dedupKey } from './lib/parse.js';
 import { scoreAll } from './lib/match.js';
 import { siteApiFor, readSiteApi } from './lib/sites.js';
+import { sendToTelegram } from './lib/telegram.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const rand = (a, b) => a + Math.random() * (b - a);
@@ -732,6 +733,10 @@ async function notifyFresh(keys, settings) {
     fresh.sort((a, b) => b.score - a.score);
     notify(`new:${Date.now()}`, `Новых подходящих вакансий: ${fresh.length}`,
       fresh.slice(0, 3).map((f) => `${Math.round(f.score * 100)}% · ${f.v.title}${f.v.company ? ` — ${f.v.company}` : ''}`).join('\n'));
+    // И в Telegram, если подключён бот.
+    await sendToTelegram(`Новых подходящих вакансий: ${fresh.length}`,
+      fresh.map(({ v, score }) => ({ title: v.title, company: v.company || '', score: Math.round(score * 100), url: v.url })))
+      .catch((e) => console.warn('telegram', e));
   }
 }
 

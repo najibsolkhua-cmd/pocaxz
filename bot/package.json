@@ -1,0 +1,14 @@
+{
+  "name": "solk-job-bot",
+  "private": true,
+  "type": "module",
+  "description": "Telegram-бот solk / job: поддержка по базе знаний и уведомления о новых вакансиях из расширения.",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node src/main.js",
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.135.0"
+  }
+}

@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>solk / job — бесплатная CRM для поиска работы</title>
+  <meta name="description" content="Расширение для браузера: само собирает вакансии с hh.ru, Avito, Telegram и сайтов компаний и показывает подходящие вашему резюме. Бесплатно.">
+  <meta property="og:title" content="solk / job — бесплатная CRM для поиска работы">
+  <meta property="og:description" content="Вакансии с hh.ru, Avito, Telegram и сайтов компаний в одном месте — с оценкой, насколько подходят вашему резюме.">
+  <meta property="og:image" content="img/home.png">
+  <link rel="icon" href="img/icon.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <img class="logo" src="img/solk-job.svg" alt="solk / job">
+    <nav><a href="#how">Как работает</a><a href="#faq">Вопросы</a><a id="botLink" href="https://t.me/max_max3700" target="_blank" rel="noopener">Поддержка</a></nav>
+  </header>
+
+  <div class="hero">
+    <div>
+      <h1>Работа сама находит вас</h1>
+      <p class="lead">Загрузите резюме — solk / job соберёт вакансии с hh.ru, Avito, из Telegram-каналов и с сайтов компаний и покажет, какие подходят именно вам. Бесплатно.</p>
+      <div class="cta">
+        <a class="btn primary" id="installBtn" href="#install">Установить бесплатно</a>
+        <a class="btn ghost" href="#how">Как это работает</a>
+      </div>
+      <p class="note" id="installNote">Для Яндекс Браузера, Chrome, Edge и Opera на компьютере.</p>
+    </div>
+    <img class="shot" src="img/home.png" alt="Главная solk / job: плитки источников, лучшие вакансии, воронка откликов" width="1440" height="900">
+  </div>
+
+  <section id="how">
+    <h2>Три шага — и поиск идёт сам</h2>
+    <div class="grid3">
+      <div class="card"><b class="n">1</b><h3>Установите</h3><p>Одна кнопка «Установить» — расширение появится в браузере и будет обновляться само.</p></div>
+      <div class="card"><b class="n">2</b><h3>Загрузите резюме</h3><p>Профиль заполнится сам: должность, навыки, город. Поиски на hh.ru и Avito настроятся сразу.</p></div>
+      <div class="card"><b class="n">3</b><h3>Нажмите «Найти работу»</h3><p>На главной видно, сколько вакансий подходит в каждом источнике, и «Подходит мне 87%» у каждой.</p></div>
+    </div>
+    <div class="sources" aria-label="Источники">
+      <span><img src="img/hh.svg" alt="">hh.ru</span>
+      <span><img src="img/avito.svg" alt="">Avito</span>
+      <span><img src="img/telegram.svg" alt="">Telegram-каналы</span>
+      <span><img src="img/https.svg" alt="" style="filter:invert(1)">любые сайты компаний</span>
+    </div>
+  </section>
+
+  <section id="install">
+    <h2>Установка</h2>
+    <div id="installBox">
+      <ol class="steps">
+        <li>Нажмите «Установить бесплатно» вверху страницы.</li>
+        <li>В открывшемся каталоге нажмите «Добавить в Яндекс Браузер» или «Установить».</li>
+        <li>Откроется главная solk / job — перетащите туда резюме.</li>
+      </ol>
+    </div>
+  </section>
+
+  <section id="faq">
+    <h2>Частые вопросы</h2>
+    <details><summary>Это правда бесплатно?</summary><p>Да, полностью. Во время поиска на главной показывается рекламный блок Яндекса — так проект зарабатывает и остаётся бесплатным.</p></details>
+    <details><summary>Куда уходит моё резюме?</summary><p>Никуда. Резюме, профиль и вакансии хранятся только в вашем браузере. Подробнее — в <a href="privacy.html">политике конфиденциальности</a>.</p></details>
+    <details><summary>Нужно ли входить в hh.ru, Avito или Telegram?</summary><p>Нет. Расширение открывает сайты в вашем браузере, как вы сами, — с паузами и человеческой скоростью.</p></details>
+    <details><summary>Работает на телефоне?</summary><p>Пока только на компьютере: в Яндекс Браузере, Chrome, Edge и Opera.</p></details>
+    <details><summary>Можно получать вакансии в Telegram?</summary><p>Да: в расширении «Поиск и настройки» → «Уведомления в Telegram» → «Подключить». Бот поддержки отвечает и на любые вопросы о solk / job.</p></details>
+    <details><summary>Как обновлять?</summary><p>Ничего делать не нужно: браузер обновляет расширение из каталога сам.</p></details>
+  </section>
+
+  <footer>
+    <span>© solk / job</span>
+    <span><a href="privacy.html">Политика конфиденциальности</a> · <a id="botLink2" href="https://t.me/max_max3700" target="_blank" rel="noopener">Поддержка в Telegram</a></span>
+  </footer>
+</div>
+<script src="config.js"></script>
+<script src="install.js"></script>
+</body>
+</html>

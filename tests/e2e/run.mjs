@@ -56,8 +56,22 @@ function route(url) {
 }
 
 const hits = [];
+const tgNotify = []; // что расширение отправило «боту»
 const server = http.createServer((req, res) => {
   hits.push(req.url);
+  // Сервер Telegram-бота (bot/): привязка и уведомления.
+  if (req.url.startsWith('/api/')) {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      const json = (code, obj) => { res.writeHead(code, { 'content-type': 'application/json', 'access-control-allow-origin': '*' }); res.end(JSON.stringify(obj)); };
+      if (req.url.startsWith('/api/link-status')) return json(200, { linked: true, name: 'Иван' });
+      if (req.url.startsWith('/api/notify')) { tgNotify.push(JSON.parse(body)); return json(200, { ok: true }); }
+      if (req.url.startsWith('/api/unlink')) return json(200, { ok: true });
+      return json(404, { error: 'not found' });
+    });
+    return;
+  }
   // API сайта карьеры (как у T-Банка): POST с JSON, отвечает только на правильный запрос.
   if (req.url.startsWith('/pfpjobs/papi/getVacancies')) {
     let body = '';
@@ -87,6 +101,9 @@ fs.cpSync(path.join(root, 'extension'), extDir, { recursive: true });
 const manifest = JSON.parse(fs.readFileSync(path.join(extDir, 'manifest.json'), 'utf8'));
 manifest.host_permissions.push('http://127.0.0.1/*');
 fs.writeFileSync(path.join(extDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
+// Бот «запущен» на локальном сервере фикстур.
+const cfgPath = path.join(extDir, 'config.js');
+fs.writeFileSync(cfgPath, fs.readFileSync(cfgPath, 'utf8').replace("botUsername: ''", "botUsername: 'solk_test_bot'").replace("botApi: ''", `botApi: '${base}'`));
 
 const { chromium } = await loadPlaywright();
 
@@ -264,7 +281,8 @@ try {
     assert.ok(await page.locator('#accessBar').isHidden(), 'доступ к сайтам есть — плашки нет');
     assert.ok((await page.locator('#searchTile').textContent()).includes('включится после первого поиска'), 'до первого поиска автопоиск не запускается');
     // «/ поддержка» — ссылка на Telegram, по центру строки со временем.
-    assert.equal(await page.locator('#supportLink').getAttribute('href'), 'https://t.me/max_max3700');
+    // Бот настроен (config.js в тесте) — «/ поддержка» ведёт в бота.
+    assert.equal(await page.locator('#supportLink').getAttribute('href'), 'https://t.me/solk_test_bot');
     // По направляющим логотипа: верх кнопки — по верху строчных «s/o», низ — по нижнему краю «solk».
     const m = await page.evaluate(() => {
       const sup = document.getElementById('supportLink').getBoundingClientRect();
@@ -279,6 +297,21 @@ try {
     await until(async () => (await storage(page)).settings?.scanLimit === 250, 3000, 'лимит 250');
     await page.locator('.limit button', { hasText: '10' }).first().click();
     await until(async () => (await storage(page)).settings?.scanLimit === 10, 3000, 'лимит 10');
+  });
+
+  await step('Telegram: подключение к боту по одной кнопке', async () => {
+    await page.evaluate(() => { location.hash = 'search'; });
+    const sec = page.locator('.drawer.open .dsec', { hasText: 'Уведомления в Telegram' });
+    await sec.waitFor();
+    const [tgReq] = await Promise.all([
+      context.waitForEvent('request', (r) => r.url().startsWith('https://t.me/')),
+      sec.locator('button', { hasText: 'Подключить Telegram' }).click(),
+    ]);
+    assert.match(tgReq.url(), /^https:\/\/t\.me\/solk_test_bot\?start=[0-9a-f]{32}$/);
+    for (const pg of context.pages()) if (pg !== page && !pg.url().startsWith('chrome-extension://')) await pg.close().catch(() => {});
+    await sec.locator('p', { hasText: 'Подключено (Иван)' }).waitFor({ timeout: 8000 });
+    assert.equal((await storage(page)).tgLink.linked, true);
+    await page.locator('.drawer-close').click();
   });
 
   // Реальные hh.ru/Avito в тесте недоступны: выключаем автопоиски и подставляем фикстуры.
@@ -325,6 +358,9 @@ try {
     const q = st['srcstate:av'].lastQuota;
     assert.ok(q >= 20 && q <= 34, `доля источника: ${q}`);
     assert.ok(await page.locator('#limitHint').textContent(), 'подсказка, как делится лимит');
+    // Новые подходящие вакансии ушли и в Telegram.
+    const sent = tgNotify.at(-1);
+    assert.ok(sent && sent.token === st.tgLink.token && sent.items.length && sent.items.every((x) => x.title && x.url && x.score >= 0), JSON.stringify(sent));
   });
 
   let all = await storage(page);
@@ -478,6 +514,10 @@ try {
     // Таймер вместо выбора лимита: «осталось ≈ м:сс · готово к чч:мм».
     await until(async () => /^осталось ≈ \d+:\d\d · готово к \d\d:\d\d$/.test(await page.locator('#etaText').textContent()), 4000, 'таймер');
     assert.ok(await page.locator('.limit').isHidden(), 'во время поиска выбор лимита скрыт');
+    // Во время поиска — рекламный блок на месте часов и имени (пока заглушка РСЯ).
+    await page.locator('.ad-card .ad-meta', { hasText: 'Реклама' }).waitFor({ timeout: 3000 });
+    assert.ok(await page.locator('.main-left').isHidden() && await page.locator('#who').isHidden());
+    if (process.env.SCREENSHOT_DIR) await page.screenshot({ path: path.join(process.env.SCREENSHOT_DIR, 'searching.png') });
     const text = await page.locator('#findText').textContent();
     const oneLine = await page.locator('#findText').evaluate((el) => el.offsetHeight < parseFloat(getComputedStyle(el).fontSize) * 1.8 && getComputedStyle(el).whiteSpace === 'nowrap');
     assert.ok(oneLine, `текст прогресса в одну строку: ${text}`);
@@ -487,6 +527,7 @@ try {
     // Главная — сразу в исходном состоянии.
     await until(async () => (await page.locator('#findText').textContent()) === '/ Найти работу', 1000, 'кнопка вернулась сразу');
     assert.ok(await page.locator('#stopBtn').isHidden() && await page.locator('.limit').isVisible() && await page.locator('#eta').isHidden());
+    assert.ok(await page.locator('.ad-card').isHidden() && await page.locator('.main-left').isVisible(), 'реклама скрыта, часы на месте');
     assert.equal(await page.locator('.t-src.scanning').count(), 0, 'плитки не «ищу…»');
     assert.ok(!(await page.locator('.t-src').allTextContents()).some((t) => t.includes('в очереди')), 'плитки не «в очереди»');
     // И фон действительно остановился, не дожидаясь 25-секундной загрузки.
