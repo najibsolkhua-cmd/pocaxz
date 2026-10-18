@@ -7,6 +7,7 @@
     "test": "node --test tests/unit/*.test.js",
     "test:e2e": "xvfb-run -a node tests/e2e/run.mjs",
     "pack": "node scripts/gen-files.mjs && node scripts/pack.mjs",
-    "test:bot": "cd bot && npm test"
+    "test:bot": "cd bot && npm test",
+    "store:assets": "xvfb-run -a node scripts/store-assets.mjs"
   }
 }

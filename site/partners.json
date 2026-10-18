@@ -1,0 +1,47 @@
+{
+ "_comment": "Партнёрские баннеры solk / job. Поля: id, advertiser (обязательно), erid (токен маркировки ОРД — обязателен для показа в РФ), title, text, cta, url (https-ссылка партнёрки), image (https-картинка, необязательно), bg/color, professions (кому показывать; пусто — всем), weight (частота, 1–5). Расширение обновляет список раз в 6 часов.",
+ "banners": [
+  {
+   "id": "school-marketing",
+   "advertiser": "Онлайн-школа (пример)",
+   "erid": "",
+   "title": "Профессия «Интернет-маркетолог»",
+   "text": "Первые 2 недели бесплатно — проверьте, ваше ли это",
+   "cta": "Подробнее",
+   "url": "https://solkhua.ru/",
+   "bg": "linear-gradient(135deg, #5b2bd6, #ff5c8a)",
+   "color": "#fff",
+   "professions": [
+    "маркетолог",
+    "маркетинг",
+    "smm",
+    "таргет",
+    "marketing"
+   ],
+   "weight": 2
+  },
+  {
+   "id": "bank-card",
+   "advertiser": "Банк (пример)",
+   "erid": "",
+   "title": "Зарплатная карта с кешбэком",
+   "text": "Получайте зарплату на карту с кешбэком у партнёров",
+   "cta": "Оформить",
+   "url": "https://solkhua.ru/",
+   "bg": "linear-gradient(135deg, #ffdd2d, #ffb800)",
+   "color": "#17181b"
+  },
+  {
+   "id": "resume-review",
+   "advertiser": "Карьерный сервис (пример)",
+   "erid": "",
+   "title": "Разбор резюме за 24 часа",
+   "text": "Консультант подскажет, что поправить, чтобы чаще звали на интервью",
+   "cta": "Узнать больше",
+   "url": "https://solkhua.ru/",
+   "image": "",
+   "bg": "linear-gradient(135deg, #0a86d1, #17c3b2)",
+   "color": "#fff"
+  }
+ ]
+}

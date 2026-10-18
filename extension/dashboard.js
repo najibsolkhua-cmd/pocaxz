@@ -3,7 +3,7 @@
 
 import * as store from './lib/store.js';
 import { DEFAULT_PROFILE, scoreAll, profileSkills, exclusionStats } from './lib/match.js';
-import { $, h, logo, fmtTime, ago, daysSince, plural, download } from './ui/dom.js';
+import { $, h, logo, fmtTime, daysSince, plural, download } from './ui/dom.js';
 import { createVacancyList } from './ui/vacancies.js';
 import { renderProfile } from './ui/profile.js';
 import { sourceRows, addSourceForm } from './ui/sources.js';
@@ -11,6 +11,7 @@ import { makeZip } from './lib/zip.js';
 import { createAdSlot } from './ui/ads.js';
 import { supportLink } from './config.js';
 import * as tg from './lib/telegram.js';
+import { createPartnerTile } from './ui/partners.js';
 
 const send = (msg) => chrome.runtime.sendMessage(msg);
 const PLATFORMS = ['avito', 'generic', 'telegram', 'hh'];
@@ -148,7 +149,7 @@ function renderSourceTiles() {
     else if (!last) sub = `${srcs.length} ${plural(srcs.length, 'источник', 'источника', 'источников')} · ещё не искали`;
     else {
       const onSite = states.map((st) => st.lastTotal).filter((n) => n > 0).reduce((a, b) => a + b, 0);
-      sub = `подходят ${good.length} из ${rows.length}${onSite ? ` · на сайте ${onSite.toLocaleString('ru-RU')}` : ` · ${ago(last)}`}`;
+      sub = `подходят ${good.length} из ${rows.length}${onSite ? ` · на сайте ${onSite.toLocaleString('ru-RU')}` : ` · ${fmtTime(last)}`}`;
     }
     tile.querySelector('.sub').textContent = sub;
     tile.classList.toggle('warn', blocked && !scanning);
@@ -231,8 +232,23 @@ function openVacancy(e, v) {
   if (v.status === 'new') store.setUserFields(v.key, { status: 'viewed' });
 }
 
+// Оставляем столько пунктов, сколько целиком помещается в плитку, — без обрезанных строк.
+function fitList(box, more) {
+  const ul = box.querySelector('ul, ol');
+  if (!ul) return 0;
+  let hidden = 0;
+  const overflow = () => box.scrollHeight > box.clientHeight + 1;
+  while (ul.children.length > 1 && overflow()) { ul.lastElementChild.remove(); hidden++; }
+  if (hidden && more) {
+    const total = () => hidden;
+    ul.append(more(total()));
+    while (ul.children.length > 2 && overflow()) { ul.children[ul.children.length - 2].remove(); hidden++; ul.lastElementChild.replaceWith(more(total())); }
+  }
+  return hidden;
+}
+
 function renderTopTile() {
-  const rows = matching(state.scored).filter(({ v }) => ['new', 'viewed'].includes(v.status)).sort((a, b) => b.s.score - a.s.score).slice(0, 4);
+  const rows = matching(state.scored).filter(({ v }) => ['new', 'viewed'].includes(v.status)).sort((a, b) => b.s.score - a.s.score).slice(0, 6);
   $('topTile').replaceChildren(rows.length
     ? h('ol', { class: 'mini-list' }, rows.map(({ v, s }) => h('li', {},
       h('span', { class: 'mini-score' }, Math.round(s.score * 100)),
@@ -240,6 +256,9 @@ function renderTopTile() {
         h('span', { class: 'mini-title' }, v.title),
         h('span', { class: 'mini-sub' }, [v.company, store.PLATFORM_NAMES[v.platform]].filter(Boolean).join(' · '))))))
     : h('p', { class: 'cta' }, state.scored.length ? 'Новых подходящих нет — загляните позже или ослабьте условия в профиле.' : 'Нажмите «/ Найти работу» — здесь появятся лучшие совпадения.'));
+  fitList($('topTile'));
+  const f = funnelCounts();
+  $('topMore').textContent = f.good ? `Все ${f.good} подходящих и воронка →` : 'Все вакансии и воронка →';
 }
 
 // Те же числа, что на плитках источников и в «Поиске»: «подходят» = сумма по источникам.
@@ -250,23 +269,12 @@ function funnelCounts() {
   return {
     good: good.length,
     unseen: good.filter(({ v }) => v.status === 'new').length,
-    viewed: c.viewed || 0, applied: c.applied || 0, interview: c.interview || 0, offer: c.offer || 0, rejected: c.rejected || 0,
+    viewed: c.viewed || 0, responded: c.responded || 0, applied: c.applied || 0, interview: c.interview || 0, offer: c.offer || 0, rejected: c.rejected || 0, hidden: c.hidden || 0,
+    mine: store.MY_STATUSES.reduce((n, k) => n + (c[k] || 0), 0),
   };
 }
 
-function renderFunnelTile() {
-  const f = funnelCounts();
-  const rows = [
-    ['lead', 'Подходят вам', f.good],
-    ['sub', 'ещё не смотрел', f.unseen],
-    ['', 'Просмотрел', f.viewed],
-    ['', 'Отправил резюме', f.applied],
-    ['', 'Интервью', f.interview],
-    ['', 'Оффер', f.offer],
-    ['', 'Отказ', f.rejected],
-  ];
-  $('funnelTile').replaceChildren(h('ul', { class: 'funnel' }, rows.map(([cls, label, n]) => h('li', { class: cls }, h('b', {}, n), h('span', {}, label)))));
-}
+const partners = createPartnerTile($('partnersTile'));
 
 function renderSearchTile() {
   const runs = state.all.runs || [];
@@ -284,18 +292,21 @@ function renderSearchTile() {
     h('dt', {}, 'Авто-поиск'), h('dd', {}, !auto ? 'выключен' : !state.all.autoArmed && !runs.length ? 'включится после первого поиска' : next ? `следующий ${fmtTime(next)}` : 'включён')));
 }
 
+// «Мои отклики»: всё, кроме «Не смотрел» и «Просмотрел», свежие изменения сверху.
 function renderAppliedTile() {
-  const rows = state.scored.filter(({ v }) => ['applied', 'interview', 'offer'].includes(v.status))
-    .sort((a, b) => Date.parse(b.v.statusChangedAt || 0) - Date.parse(a.v.statusChangedAt || 0)).slice(0, 3);
+  const rows = state.scored.filter(({ v }) => store.MY_STATUSES.includes(v.status))
+    .sort((a, b) => Date.parse(b.v.statusChangedAt || 0) - Date.parse(a.v.statusChangedAt || 0));
   $('appliedTile').replaceChildren(rows.length
-    ? h('ul', { class: 'mini-list plain' }, rows.map(({ v }) => {
+    ? h('ul', { class: 'mini-list plain' }, rows.slice(0, 8).map(({ v }) => {
       const d = daysSince(v.statusChangedAt);
-      const note = v.status === 'applied' ? (d >= 7 ? `ждёт ответа ${d} дн — напомните о себе` : `ждёт ответа ${d ?? 0} дн`) : STATUS_LABEL[v.status];
+      const waiting = store.WAITING_STATUSES.includes(v.status);
+      const note = waiting ? `${STATUS_LABEL[v.status]} · ${d >= 7 ? `ждёт ответа ${d} дн — напомните о себе` : `ждёт ответа ${d ?? 0} дн`}` : STATUS_LABEL[v.status];
       return h('li', {}, h('a', { href: v.url, target: '_blank', rel: 'noopener', onclick: (e) => e.stopPropagation() },
         h('span', { class: 'mini-title' }, v.title),
-        h('span', { class: `mini-sub ${v.status === 'applied' && d >= 7 ? 'late' : ''}` }, [v.company, note].filter(Boolean).join(' · '))));
+        h('span', { class: `mini-sub ${waiting && d >= 7 ? 'late' : ''}` }, [v.company, note].filter(Boolean).join(' · '))));
     }))
-    : h('p', { class: 'cta' }, 'Отметьте «Отправил резюме» у вакансии — она появится здесь, и вы не забудете про ответ.'));
+    : h('p', { class: 'cta' }, 'Отметьте у вакансии «Откликнулся» или «Отправил резюме» — она появится здесь, и вы не забудете про ответ.'));
+  fitList($('appliedTile'), (n) => h('li', { class: 'mini-more' }, `и ещё ${n} — открыть все →`));
 }
 
 function renderHome() {
@@ -304,7 +315,7 @@ function renderHome() {
   renderMain();
   renderProfileTile();
   renderTopTile();
-  renderFunnelTile();
+  partners.update(state.profile);
   renderSearchTile();
   renderAppliedTile();
 }
@@ -317,8 +328,7 @@ const DRAWERS = {
   telegram: { title: 'Telegram', platform: 'telegram' },
   generic: { title: 'Сайты компаний', platform: 'generic' },
   profile: { title: 'Профиль и резюме' },
-  all: { title: 'Все подходящие вакансии' },
-  funnel: { title: 'Воронка' },
+  all: { title: 'Подходящие вакансии и воронка' },
   applied: { title: 'Мои отклики' },
   search: { title: 'Поиск и настройки' },
 };
@@ -339,9 +349,8 @@ function openDrawer(kind) {
   drawer = { kind };
   if (def.platform) buildPlatformDrawer(body, def.platform);
   else if (kind === 'profile') buildProfileDrawer(body);
-  else if (kind === 'all') buildListDrawer(body, { showPlatform: true });
-  else if (kind === 'funnel') buildListDrawer(body, { showStatusTabs: true, showPlatform: true });
-  else if (kind === 'applied') buildListDrawer(body, { statuses: ['applied', 'interview', 'offer'], showPlatform: true });
+  else if (kind === 'all') buildListDrawer(body, { showStatusTabs: true, showPlatform: true, funnel: true });
+  else if (kind === 'applied') buildListDrawer(body, { statuses: store.MY_STATUSES, showStatusTabs: true, showPlatform: true });
   else if (kind === 'search') buildSearchDrawer(body);
 }
 
@@ -353,11 +362,24 @@ function closeDrawer() {
   drawer = null;
 }
 
-function buildListDrawer(body, opts) {
+function buildListDrawer(body, { funnel = false, ...opts }) {
   const list = createVacancyList({ ...opts, matchScore: state.settings.matchScore });
   const excl = h('div', {});
-  body.replaceChildren(excl, list.el);
-  drawer.refresh = () => { excl.replaceChildren(exclusionLine(state.scored)); list.update(state.scored); };
+  const stats = funnel ? h('div', { class: 'stats' }) : null;
+  body.replaceChildren(...[stats, excl, list.el].filter(Boolean));
+  drawer.refresh = () => {
+    if (stats) {
+      // Воронка — здесь же, над списком: сколько подходит и что с ними дальше.
+      const f = funnelCounts();
+      stats.replaceChildren(
+        stat(f.good, 'подходят вам', `С оценкой «Подходит мне» от ${Math.round(state.settings.matchScore * 100)}%`),
+        stat(f.unseen, 'ещё не смотрел'),
+        stat(f.mine, 'в «Моих откликах»', 'Всё, кроме «Не смотрел» и «Просмотрел»'),
+        stat(f.interview + f.offer, 'интервью и офферы'));
+    }
+    excl.replaceChildren(exclusionLine(state.scored));
+    list.update(state.scored);
+  };
   drawer.refresh();
 }
 
@@ -433,7 +455,7 @@ function buildSearchDrawer(body) {
   const openIn = h('select', {}, h('option', { value: 'tab', selected: s.openIn === 'tab' }, 'в фоновой вкладке'), h('option', { value: 'window', selected: s.openIn === 'window' }, 'в свёрнутом окне'));
   const match = h('input', { type: 'number', min: 10, max: 95, step: 5, value: Math.round(s.matchScore * 100) });
   const notify = h('input', { type: 'number', min: 0, max: 100, step: 5, value: Math.round(s.notifyScore * 100) });
-  const retention = h('input', { type: 'number', min: 7, max: 365, value: s.retentionDays });
+  const retention = h('input', { type: 'number', min: 0, max: 3650, value: s.retentionDays || 0, title: '0 — никогда не удалять' });
   const saved = h('span', { class: 'muted small' });
 
   const settingsForm = h('form', { class: 'settings', onsubmit: async (e) => {
@@ -445,7 +467,7 @@ function buildSearchDrawer(body) {
       openIn: openIn.value,
       matchScore: Math.min(0.95, Math.max(0.1, (Number(match.value) || 50) / 100)),
       notifyScore: (Number(notify.value) || 0) / 100,
-      retentionDays: Number(retention.value) || 45,
+      retentionDays: Math.max(0, Number(retention.value) || 0),
     });
     saved.textContent = 'Сохранено';
     setTimeout(() => { saved.textContent = ''; }, 2500);
@@ -456,7 +478,7 @@ function buildSearchDrawer(body) {
     h('div', { class: 'field' }, h('span', { class: 'field-label' }, 'Открывать сайты'), openIn),
     h('div', { class: 'field' }, h('span', { class: 'field-label' }, 'Вакансия «подходит» с оценки, %'), match),
     h('div', { class: 'field' }, h('span', { class: 'field-label' }, 'Уведомлять с оценки, %'), notify),
-    h('div', { class: 'field' }, h('span', { class: 'field-label' }, 'Хранить нетронутые, дней'), retention)),
+    h('div', { class: 'field' }, h('span', { class: 'field-label' }, 'Удалять нетронутые через, дней (0 — никогда)'), retention)),
   h('div', { class: 'savebar' }, h('button', { class: 'btn primary', type: 'submit' }, 'Сохранить'), saved));
 
   const srcBox = h('div', {});
@@ -665,6 +687,8 @@ async function pollStatus() {
 // ---------------- Связка ----------------
 
 function route() {
+  // Воронка теперь внутри «Лучшее для вас».
+  if (location.hash === '#funnel') { location.replace('#all'); return; }
   const kind = decodeURIComponent(location.hash.slice(1));
   if (kind && DRAWERS[kind]) openDrawer(kind);
   else closeDrawer();
@@ -718,6 +742,10 @@ function bind() {
     pollStatus();
   });
   $('supportLink').addEventListener('click', (e) => e.stopPropagation());
+  document.querySelector('.brand-link').addEventListener('click', (e) => e.stopPropagation());
+  // Плитки со списками подстраиваются под размер окна: без обрезанных строк.
+  let fitTimer;
+  window.addEventListener('resize', () => { clearTimeout(fitTimer); fitTimer = setTimeout(() => { renderTopTile(); renderAppliedTile(); }, 150); });
   document.querySelectorAll('.limit button').forEach((b) => b.addEventListener('click', () => setLimit(b.dataset.limit)));
   $('limitInput').addEventListener('change', (e) => setLimit(e.target.value));
   $('limitInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') e.target.blur(); });

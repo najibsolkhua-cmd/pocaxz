@@ -36,8 +36,8 @@
    docker run -d --restart=always -e TELEGRAM_BOT_TOKEN=... -e ANTHROPIC_API_KEY=... \
      -p 8787:8787 -v solk-bot-data:/data solk-bot
    ```
-3. **Откройте HTTPS-адрес для API.** Например, `https://bot.solk-job.ru` → `localhost:8787`
-   через Caddy: одна строка `bot.solk-job.ru { reverse_proxy localhost:8787 }`.
+3. **Откройте HTTPS-адрес для API.** Например, `https://bot.solkhua.ru` → `localhost:8787`
+   через Caddy: одна строка `bot.solkhua.ru { reverse_proxy localhost:8787 }`.
 4. **Пропишите бота в расширении.** В `extension/config.js`:
    `telegram.botUsername` (без @) и `telegram.botApi` (HTTPS-адрес из шага 3).
    Выпустите новую версию. После этого кнопка «/ поддержка» ведёт в бота, а в

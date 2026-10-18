@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8">
+<style>
+  @font-face { font-family: Manrope; font-weight: 700; src: url(../site/fonts/manrope-cyrillic-700-normal.woff2) format('woff2'); }
+  @font-face { font-family: Manrope; font-weight: 500; src: url(../site/fonts/manrope-cyrillic-500-normal.woff2) format('woff2'); }
+  html, body { margin: 0; height: 100%; }
+  body { background: #b81400; color: #fff; font-family: Manrope, sans-serif; display: flex; align-items: center; justify-content: space-between; padding: 0 6%; box-sizing: border-box; overflow: hidden; }
+  .text { max-width: 60%; }
+  img.logo { height: 18vh; display: block; margin-bottom: 4vh; }
+  h1 { margin: 0; font-weight: 700; font-size: 12vh; line-height: 1.05; letter-spacing: -.02em; }
+  p { margin: 3vh 0 0; font-weight: 500; font-size: 5.6vh; opacity: .9; }
+  .tiles { display: grid; grid-template-columns: repeat(2, 18vh); gap: 2.4vh; }
+  .tiles span { width: 18vh; height: 18vh; border-radius: 4vh; display: grid; place-items: center; }
+  .tiles img { width: 60%; }
+  .small h1 { font-size: 15vh; } .small p { font-size: 7vh; } .small .tiles { display: none; } .small .text { max-width: 100%; }
+</style></head>
+<body>
+  <div class="text">
+    <img class="logo" src="../extension/img/solk-job.svg" alt="">
+    <h1>Работа сама находит вас</h1>
+    <p>Вакансии с hh.ru, Avito, Telegram и сайтов компаний — по вашему резюме. Бесплатно.</p>
+  </div>
+  <div class="tiles">
+    <span style="background:#2a1d4f"><img src="../extension/img/avito.svg" alt=""></span>
+    <span style="background:#1fb45a"><img src="../extension/img/https.svg" alt=""></span>
+    <span style="background:#2b9fe0"><img src="../extension/img/telegram.svg" alt=""></span>
+    <span style="background:#202124"><img src="../extension/img/hh.svg" alt=""></span>
+  </div>
+  <script>if (new URLSearchParams(location.search).get('w') === '440') document.body.classList.add('small');</script>
+</body></html>

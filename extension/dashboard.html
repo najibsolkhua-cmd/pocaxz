@@ -55,7 +55,7 @@
           <!-- Поддержка: по центру строки со временем (см. renderClock → --time-frac). -->
           <a class="support" id="supportLink" href="https://t.me/max_max3700" target="_blank" rel="noopener" title="Написать в поддержку в Telegram">/ поддержка</a>
         </div>
-        <img class="brand" src="img/solk-job.svg" alt="solk / job" draggable="false">
+        <a class="brand-link" href="https://solkhua.ru/" target="_blank" rel="noopener" title="Сайт solk / job — solkhua.ru"><img class="brand" src="img/solk-job.svg" alt="solk / job" draggable="false"></a>
       </div>
       <button class="who" id="who" type="button" data-open="profile">
         <span class="name" id="whoName"></span>
@@ -82,16 +82,16 @@
       </div>
     </section>
 
-    <!-- Лучшее -->
+    <!-- Лучшее: открывает все подходящие вакансии вместе с воронкой и фильтрами -->
     <div class="tile t-top" data-open="all" role="button" tabindex="0">
       <span class="dot-line"><i class="dot"></i><span class="tile-title">Лучшее для вас</span></span>
       <div class="tile-body" id="topTile"></div>
+      <span class="tile-more" id="topMore">Все вакансии и воронка →</span>
     </div>
 
-    <!-- Воронка -->
-    <div class="tile t-funnel" data-open="funnel" role="button" tabindex="0">
-      <span class="dot-line"><i class="dot"></i><span class="tile-title">Воронка</span></span>
-      <div class="tile-body" id="funnelTile"></div>
+    <!-- Партнёрские баннеры (ui/partners.js) -->
+    <div class="tile t-partners" aria-label="Предложения партнёров">
+      <div class="partners" id="partnersTile"></div>
     </div>
 
     <!-- Поиск -->

@@ -2,7 +2,7 @@
 
 export const CONFIG = {
   // Сайт-переходник: страница установки, политика конфиденциальности, рекламный блок.
-  siteUrl: 'https://solk-job.ru',
+  siteUrl: 'https://solkhua.ru/',
   // Поддержка: пока бот не запущен — личный Telegram, потом — бот (botUsername ниже).
   supportUrl: 'https://t.me/max_max3700',
 
@@ -20,9 +20,18 @@ export const CONFIG = {
   //         'off'  — без рекламы.
   ads: {
     mode: 'stub',
-    frameUrl: 'https://solk-job.ru/ad.html',
+    frameUrl: 'https://solkhua.ru/ad.html',
     rotateSec: 20,
   },
+};
+
+// Партнёрские баннеры (плитка справа внизу). Список берётся из partners.json на сайте —
+// добавлять и менять баннеры можно без выпуска новой версии расширения. Пока файл
+// недоступен, показываются встроенные примеры из ui/partners.js.
+CONFIG.partners = {
+  url: 'https://solkhua.ru/partners.json',
+  rotateSec: 8,
+  refreshHours: 6,
 };
 
 export const supportLink = () => (CONFIG.telegram.botUsername ? `https://t.me/${CONFIG.telegram.botUsername}` : CONFIG.supportUrl);

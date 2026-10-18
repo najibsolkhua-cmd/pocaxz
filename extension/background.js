@@ -22,6 +22,11 @@ async function setupAlarm() {
 
 chrome.runtime.onInstalled.addListener(async ({ reason }) => {
   await setupAlarm();
+  // С версии 0.10 по умолчанию ничего не удаляем: прежнее «45 дней» было значением по умолчанию.
+  if (reason === 'update') {
+    const s = await store.getSettings();
+    if (s.retentionDays === 45) await store.saveSettings({ ...s, retentionDays: 0 });
+  }
   if (reason === 'install') chrome.tabs.create({ url: chrome.runtime.getURL('dashboard.html#profile') });
   scheduleBadge();
 });
@@ -602,16 +607,7 @@ async function runSource(src, settings, quota = settings.scanLimit) {
   return { status, ...stats, fresh };
 }
 
-async function rescheduleAll() {
-  const now = Date.now();
-  const patch = {};
-  const all = await store.getAll();
-  for (const s of await store.getSources()) {
-    const st = all[`srcstate:${s.id}`] || {};
-    patch[`srcstate:${s.id}`] = { ...st, nextRunAt: new Date(now + s.intervalMin * 60e3).toISOString() };
-  }
-  if (Object.keys(patch).length) await chrome.storage.local.set(patch);
-}
+const rescheduleAll = () => store.rescheduleAll();
 
 async function markArchived(platform, externalId) {
   const k = `v:${platform}:${externalId}`;
@@ -740,7 +736,10 @@ async function notifyFresh(keys, settings) {
   }
 }
 
+// Автоудаление — только если вы сами включили его в настройках («Удалять нетронутые через N дней»).
+// По умолчанию ничего не удаляется: всё найденное и просмотренное хранится, пока вы не удалите сами.
 async function cleanup(settings) {
+  if (!(Number(settings.retentionDays) > 0)) return;
   const all = await store.getAll();
   const limit = Date.now() - settings.retentionDays * 86400e3;
   const remove = [];

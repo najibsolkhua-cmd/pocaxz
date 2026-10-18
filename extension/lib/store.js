@@ -18,12 +18,18 @@ const local = chrome.storage.local;
 export const STATUSES = [
   ['new', 'Не смотрел'],
   ['viewed', 'Просмотрел'],
+  ['responded', 'Откликнулся'],
   ['applied', 'Отправил резюме'],
   ['interview', 'Интервью'],
   ['offer', 'Оффер'],
   ['rejected', 'Отказ'],
   ['hidden', 'Скрыто'],
 ];
+
+// «Мои отклики» — всё, с чем вы уже работаете: любой статус, кроме «Не смотрел» и «Просмотрел».
+export const MY_STATUSES = ['responded', 'applied', 'interview', 'offer', 'rejected', 'hidden'];
+// Ждём ответа работодателя.
+export const WAITING_STATUSES = ['responded', 'applied'];
 
 export const DEFAULT_SETTINGS = {
   autoRun: true,
@@ -33,7 +39,7 @@ export const DEFAULT_SETTINGS = {
   manualGapMin: 10,        // «Найти работу» не трогает источник, если его обходили недавно
   skipWhenLocked: true,    // не обходить, пока экран заблокирован
   openIn: 'tab',           // 'tab' — фоновая вкладка, 'window' — свёрнутое окно
-  retentionDays: 45,       // удалять старые вакансии, которые вы не трогали
+  retentionDays: 0,        // 0 — ничего не удалять; иначе удалять нетронутые вакансии старше N дней
   manualEnrichMax: 10,     // сколько описаний подгружать при сборе с текущей вкладки
   scanLimit: 100,          // сколько вакансий проверить за один поиск — делится между источниками
   deepCheck: 30,           // у скольких лучших новых вакансий открывать полное описание
@@ -155,8 +161,9 @@ export function vacanciesFrom(all) {
   for (const [k, v] of Object.entries(all)) {
     if (!k.startsWith('v:')) continue;
     const u = all[uKeyFor(k, pid)] || {};
-    // Снятые с публикации вакансии пропадают, если вы с ними ещё не работали.
-    if (v.archived && !['applied', 'interview', 'offer'].includes(u.status)) continue;
+    // Снятые с публикации вакансии пропадают из выдачи, если вы с ними ещё не работали;
+    // всё, что в «Моих откликах», остаётся навсегда.
+    if (v.archived && !MY_STATUSES.includes(u.status)) continue;
     out.push({ ...v, status: u.status || 'new', note: u.note || '', statusChangedAt: u.statusChangedAt || null });
   }
   return out;
@@ -203,6 +210,19 @@ export async function ensureProfiles() {
   return { profiles, active: 'p1' };
 }
 
+// Следующий автопоиск у каждого источника — не раньше его интервала. Вызывается после «Стоп»
+// и при смене профиля: ни переключение, ни новый профиль не запускают поиск сами.
+export async function rescheduleAll() {
+  const now = Date.now();
+  const all = await local.get(null);
+  const patch = {};
+  for (const s of all.sources || []) {
+    const st = all[`srcstate:${s.id}`] || {};
+    patch[`srcstate:${s.id}`] = { ...st, nextRunAt: new Date(now + (s.intervalMin || 120) * 60e3).toISOString() };
+  }
+  if (Object.keys(patch).length) await local.set(patch);
+}
+
 // Сохраняем активный профиль в его «ячейку» и загружаем другой.
 export async function switchProfile(id) {
   const { profiles, active } = await ensureProfiles();
@@ -215,6 +235,7 @@ export async function switchProfile(id) {
   if (next[`resume:${id}`]) await local.set({ resume: next[`resume:${id}`] });
   else await local.remove('resume');
   await syncAutoSources({ ...DEFAULT_PROFILE, ...profile });
+  await rescheduleAll();
 }
 
 // Новый профиль — с чистыми данными; источники остаются.
@@ -226,6 +247,7 @@ export async function createProfile(title) {
   const t = (title || '').trim() || `Профиль ${profiles.length + 1}`;
   await local.set({ profiles: [...profiles, { id, title: t }], activeProfile: id, profile: {}, [`profile:${id}`]: {} });
   await local.remove('resume');
+  await rescheduleAll();
   return id;
 }
 
@@ -239,6 +261,7 @@ export async function deleteProfile(id) {
   const drop = [`profile:${id}`, `resume:${id}`, ...Object.keys(all).filter((k) => id !== 'p1' && k.startsWith(prefix))];
   await local.remove(drop);
   await local.set({ profiles: rest });
+  await rescheduleAll();
   return true;
 }
 

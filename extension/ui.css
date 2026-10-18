@@ -36,7 +36,7 @@
   --c-profile: #c785fb;
   --c-main: #b81400;
   --c-top: #ffde2e;
-  --c-funnel: #7d5a5a;
+  --c-funnel: #7d5a5a; /* фон плитки партнёров, пока баннер не загрузился */
   --c-search: #96b4da;
   --c-applied: #ff8bc6;
   color-scheme: light;
@@ -116,7 +116,8 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .t-main { grid-column: 3 / 7; grid-row: 2 / 4; background: var(--c-main); cursor: default; }
 .t-main:hover { transform: none; box-shadow: none; }
 .t-top { grid-column: 7 / 9; grid-row: 2; background: var(--c-top); color: var(--ink); }
-.t-funnel { grid-column: 7 / 9; grid-row: 3 / 5; background: var(--c-funnel); }
+.t-partners { grid-column: 7 / 9; grid-row: 3 / 5; background: var(--c-funnel); padding: 0; cursor: default; min-height: 280px; }
+.t-partners:hover { transform: none; box-shadow: none; }
 .t-search { grid-column: 1 / 4; grid-row: 4; background: var(--c-search); color: var(--ink); }
 .t-applied { grid-column: 4 / 7; grid-row: 4; background: var(--c-applied); color: var(--ink); }
 
@@ -246,6 +247,8 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .mini-sub { font-size: 13px; opacity: .75; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .mini-sub.late { color: #8a0b00; opacity: 1; font-weight: 700; }
 .mini-list.plain li { display: block; }
+.mini-list li.mini-more { font-size: 13px; font-weight: 700; opacity: .8; }
+.t-top .tile-body { margin-bottom: 0; }
 
 /* Воронка: строки делят высоту плитки поровну и никогда не вылезают за край */
 #funnelTile { container-type: size; }
@@ -266,14 +269,15 @@ button, input, select, textarea { font: inherit; color: inherit; }
 @media (max-width: 980px), (max-height: 600px) {
   .home { height: auto; min-height: 0; grid-template-columns: 1fr 1fr; grid-template-rows: none; grid-auto-rows: minmax(150px, auto); }
   .home > .tile { grid-column: auto; grid-row: auto; }
-  .t-main { grid-column: 1 / -1 !important; order: -1; height: 440px; }
-  .t-profile, .t-funnel { min-height: 280px; order: 1; }
+  .t-main { grid-column: 1 / -1 !important; order: -1; height: 440px; padding: 24px 22px; }
+  .t-profile, .t-partners { min-height: 280px; order: 1; }
   .t-top, .t-search, .t-applied { grid-column: 1 / -1 !important; order: 2; }
 }
 @media (max-width: 520px) {
   :root { --gap: 14px; --radius: 22px; }
-  .t-main { height: 360px; }
-  .t-profile, .t-funnel { grid-column: 1 / -1 !important; min-height: 0; }
+  .t-main { height: 360px; padding: 20px 18px; }
+  .t-profile, .t-partners { grid-column: 1 / -1 !important; min-height: 0; }
+  .t-partners { min-height: 300px !important; }
 }
 
 /* Баннер «нет доступа к сайтам» */
@@ -304,7 +308,6 @@ body.drawer-open { overflow: hidden; }
 .dk-generic .drawer-head { background: var(--c-generic); }
 .dk-profile .drawer-head { background: var(--c-profile); }
 .dk-all .drawer-head { background: var(--c-top); color: var(--ink); }
-.dk-funnel .drawer-head { background: var(--c-funnel); }
 .dk-search .drawer-head { background: var(--c-search); color: var(--ink); }
 .dk-applied .drawer-head { background: var(--c-applied); color: var(--ink); }
 .drawer-title { display: flex; align-items: center; gap: 12px; font-size: 24px; font-weight: 800; }
@@ -546,3 +549,30 @@ body.popup { width: 330px; padding: 14px; }
 .ad-title { font: 700 4.6cqh/1.2 Manrope, sans-serif; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .ad-badge { position: absolute; top: 2.6cqh; right: 2.6cqh; padding: .8cqh 1.8cqh; border-radius: 999px; background: rgba(0, 0, 0, .45); font: 600 2.4cqh/1 Manrope, sans-serif; }
 @container (max-width: 520px) { .ad-card { max-width: 56%; height: 62cqh; } }
+
+/* Логотип ведёт на сайт */
+.brand-link { display: block; flex: none; line-height: 0; border-radius: 1cqh; max-width: 52%; }
+.brand-link .brand { max-width: 100%; }
+.brand-link:focus-visible { outline: 2px solid #fff; outline-offset: 4px; }
+
+/* Партнёрские баннеры: по очереди, с маркировкой «Реклама · рекламодатель · erid» */
+.partners { position: absolute; inset: 0; }
+.pb {
+  position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: space-between;
+  padding: 22px 24px 46px; text-decoration: none; background-size: cover; background-position: center;
+  border-radius: var(--radius); animation: pb-in .35s ease;
+}
+@keyframes pb-in { from { opacity: 0; } to { opacity: 1; } }
+.pb-mark { align-self: flex-start; max-width: 100%; padding: 4px 10px; border-radius: 999px; background: rgba(0, 0, 0, .28); color: #fff; font-size: 11px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pb-body { display: grid; gap: 10px; }
+.pb-title { font-size: clamp(20px, 2.1vw, 30px); line-height: 1.12; font-weight: 800; letter-spacing: -.01em; }
+.pb-text { font-size: 15px; line-height: 1.35; opacity: .92; }
+.pb-cta { justify-self: start; margin-top: 4px; padding: 10px 18px; border-radius: 14px; background: #fff; color: #17181b; font-weight: 700; font-size: 15px; }
+.pb:hover .pb-cta { filter: brightness(.95); }
+.pb-dots { position: absolute; left: 24px; bottom: 18px; display: flex; gap: 6px; z-index: 1; }
+.pb-dots button { width: 8px; height: 8px; padding: 0; border: 0; border-radius: 50%; background: rgba(255, 255, 255, .5); cursor: pointer; }
+.pb-dots button.on { background: #fff; width: 20px; border-radius: 4px; }
+
+/* Статус «Откликнулся» */
+.status-sel.st-responded { background: #e8f1ff; }
+@container (max-width: 520px) { .limit input#limitInput { width: 15cqw; } }

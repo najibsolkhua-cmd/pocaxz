@@ -34,6 +34,15 @@ export function fmtTime(iso) {
   return d.toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
 }
 
+// Только дата: «14 окт.», для другого года — «14 окт. 2025 г.».
+export function fmtDate(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const opts = { day: 'numeric', month: 'short' };
+  if (d.getFullYear() !== new Date().getFullYear()) opts.year = 'numeric';
+  return d.toLocaleDateString('ru-RU', opts);
+}
+
 export function ago(iso) {
   if (!iso) return '';
   const d = (Date.now() - Date.parse(iso)) / 86400e3;

@@ -90,7 +90,9 @@ async function profilesBar(isDirty, onSwitched) {
     } }, 'Переименовать'),
     profiles.length > 1 ? h('button', { type: 'button', class: 'btn small ghost', onclick: async () => {
       const cur = profiles.find((x) => x.id === active);
+      // Как сброс статистики — только после двух подтверждений.
       if (!confirm(`Удалить профиль «${cur?.title}»? Его резюме, фильтры и статусы откликов удалятся. Источники и собранные вакансии останутся.`)) return;
+      if (!confirm(`Точно удалить профиль «${cur?.title}»? Это нельзя отменить.`)) return;
       await store.deleteProfile(active);
       onSwitched?.();
     } }, 'Удалить') : null);

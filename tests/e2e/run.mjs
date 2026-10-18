@@ -122,11 +122,12 @@ const resumePdf = path.join(os.tmpdir(), `resume-${process.pid}.pdf`);
 }
 
 const userDir = fs.mkdtempSync(path.join(os.tmpdir(), 'jr-profile-'));
-const context = await chromium.launchPersistentContext(userDir, {
+const launch = () => chromium.launchPersistentContext(userDir, {
   headless: false,
   args: [`--disable-extensions-except=${extDir}`, `--load-extension=${extDir}`, '--no-first-run'],
   viewport: { width: 1440, height: 900 },
 });
+let context = await launch();
 
 let failed = false;
 const step = async (name, fn) => {
@@ -160,6 +161,7 @@ try {
     assert.equal(await page.locator('.t-src').count(), 4);
     assert.equal(await page.locator('.t-src img.logo').count(), 4, 'логотипы площадок — SVG-картинки');
     assert.ok(await page.locator('img.brand[src="img/solk-job.svg"]').count(), 'логотип solk/job из SVG');
+    assert.equal(await page.locator('a.brand-link').getAttribute('href'), 'https://solkhua.ru/', 'логотип ведёт на сайт');
   });
 
   // Вкладку, открытую расширением при установке, Playwright не умеет сделать видимой —
@@ -412,15 +414,30 @@ try {
     await page.waitForTimeout(1500);
     const counts = await Promise.all(['hh', 'avito', 'telegram', 'generic'].map((p) => page.locator(`.t-${p} .count`).textContent()));
     const sum = counts.reduce((a, b) => a + Number(b || 0), 0);
-    const funnel = Number(await page.locator('#funnelTile li.lead b').textContent());
+    const funnel = Number((await page.locator('#topMore').textContent()).match(/Все (\d+) подходящих/)?.[1]);
     const search = await page.locator('#searchTile').textContent();
-    assert.equal(funnel, sum, `воронка ${funnel}, сумма плиток ${sum}`);
+    assert.equal(funnel, sum, `«Лучшее для вас» ${funnel}, сумма плиток ${sum}`);
     assert.match(search, new RegExp(`Подходят вам${sum} из`));
     assert.ok(Number(counts[0]) >= 2, `hh: ${counts[0]}`);
     assert.match(await page.locator('.t-hh .sub').textContent(), /проверку/);
-    // Воронка помещается в плитку целиком.
-    const fits = await page.evaluate(() => { const t = document.querySelector('.t-funnel'); const last = t.querySelector('.funnel li:last-child'); return last.getBoundingClientRect().bottom <= t.getBoundingClientRect().bottom; });
-    assert.ok(fits, 'строка «Отказ» вылезает за плитку');
+    // Списки на плитках не обрезаются снизу.
+    for (const id of ['topTile', 'appliedTile']) {
+      const fits = await page.evaluate((x) => { const b = document.getElementById(x); return b.scrollHeight <= b.clientHeight + 1; }, id);
+      assert.ok(fits, `${id}: текст обрезается снизу`);
+    }
+    // Вместо воронки — партнёрские баннеры с маркировкой рекламы, по очереди.
+    await page.locator('.t-partners .pb .pb-mark', { hasText: 'Реклама ·' }).waitFor();
+    assert.ok(await page.locator('.t-partners .pb-dots button').count() >= 2, 'несколько баннеров');
+    assert.equal(await page.locator('.t-partners .pb-dots button').first().getAttribute('title'), 'Python-разработчик с нуля', 'первым идёт баннер по профессии из профиля');
+    assert.ok(!(await page.locator('.t-partners .pb-dots button').evaluateAll((els) => els.map((e) => e.title))).includes('Профессия «Интернет-маркетолог»'), 'баннер для маркетологов разработчику не показан');
+    // Воронка — в «Лучшее для вас»: статистика и вкладки статусов над списком.
+    await page.locator('#topMore').click();
+    await page.waitForSelector('.drawer.open.dk-all .vc');
+    assert.equal(await page.locator('#drawerTitle').textContent(), 'Подходящие вакансии и воронка');
+    assert.equal(Number(await page.locator('#drawerBody .stat b').first().textContent()), sum);
+    assert.deepEqual(await page.locator('#drawerBody .tabs-row .tab').evaluateAll((els) => els.map((e) => e.textContent.split(' · ')[0])),
+      ['Не смотрел', 'Просмотрел', 'Откликнулся', 'Отправил резюме', 'Интервью', 'Оффер', 'Отказ', 'Скрыто']);
+    await page.keyboard.press('Escape');
   });
 
   await step('панель hh: «на сайте / собрано / подходят», объяснение оценки, без горизонтальной прокрутки', async () => {
@@ -430,6 +447,11 @@ try {
     assert.deepEqual(labels, ['вакансий на сайте', 'собрано', 'подходят вам', 'ещё не смотрели']);
     assert.equal(await page.locator('.stat b').nth(2).textContent(), await page.locator('.t-hh .count').textContent());
     assert.match(await page.locator('.vc-why').first().textContent(), /должность/);
+    // Время — последний поиск CRM, а не «N ч назад» от даты публикации.
+    const runAt = (await storage(page))['srcstate:hh'].lastRunAt;
+    const hhmm = new Date(runAt).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+    assert.ok((await page.locator('#drawerBody .vc-src').allTextContents()).some((t) => t.includes(`поиск сегодня ${hhmm}`)), `время поиска ${hhmm}`);
+    assert.ok(!(await page.locator('#drawerBody .vc-src').allTextContents()).some((t) => /ч назад/.test(t)));
     assert.match(await page.locator('.vc-score').first().textContent(), /%подходит/);
     assert.ok(await page.locator('.range', { hasText: 'Подходит мне от' }).count());
     const noHScroll = await page.evaluate(() => { const b = document.querySelector('.drawer-body'); return b.scrollWidth <= b.clientWidth + 1; });
@@ -464,13 +486,29 @@ try {
     await page.waitForSelector('.drawer.open.dk-all .vc');
     const card = page.locator('#drawerBody .vc').first();
     const title = await card.locator('h3 a').textContent();
-    await card.locator('select').selectOption('applied');
+    assert.deepEqual((await card.locator('select option').allTextContents()).slice(0, 4), ['Не смотрел', 'Просмотрел', 'Откликнулся', 'Отправил резюме']);
+    await card.locator('select').selectOption('responded');
     await card.locator('button', { hasText: 'Заметка' }).click();
     await card.locator('textarea').fill('Написал рекрутеру');
     await card.locator('textarea').blur();
     await page.keyboard.press('Escape');
     await until(() => page.locator('#appliedTile .mini-title').allTextContents().then((t) => t.includes(title)), 5000, 'вакансия в «Мои отклики»');
-    assert.match(await page.locator('#funnelTile li', { hasText: 'Отправил резюме' }).textContent(), /^1/);
+    assert.match(await page.locator('#appliedTile .mini-sub').first().textContent(), /Откликнулся · ждёт ответа 0 дн/);
+    // Всё, кроме «Не смотрел» и «Просмотрел», — в «Моих откликах»; «Просмотрел» — нет.
+    await page.evaluate(() => { location.hash = 'all'; });
+    await page.waitForSelector('.drawer.open.dk-all .vc');
+    const second = page.locator('#drawerBody .vc.st-new').first();
+    const t2 = await second.locator('h3 a').textContent();
+    await second.locator('select').selectOption('hidden');
+    await page.keyboard.press('Escape');
+    await until(() => page.locator('#appliedTile .mini-title').allTextContents().then((t) => t.includes(t2)), 5000, '«Скрыто» в «Мои отклики»');
+    await page.evaluate(() => { location.hash = 'applied'; });
+    await page.waitForSelector('.drawer.open.dk-applied .vc');
+    assert.deepEqual(await page.locator('#drawerBody .tabs-row .tab').evaluateAll((els) => els.map((e) => e.textContent.split(' · ')[0])),
+      ['Откликнулся', 'Отправил резюме', 'Интервью', 'Оффер', 'Отказ', 'Скрыто']);
+    await page.locator('#drawerBody .vc', { hasText: t2 }).locator('select').selectOption('viewed');
+    await page.keyboard.press('Escape');
+    await until(async () => (await page.locator('#appliedTile .mini-title').count()) === 1, 5000, '«Просмотрел» ушёл из откликов');
   });
 
   await step('сайт компании: вакансия пропала со страницы два раза — исчезает из списка', async () => {
@@ -573,6 +611,13 @@ try {
     await page.waitForSelector('.drawer.open .profiles-bar select');
     await page.locator('.profiles-bar select').selectOption('p1');
     await until(async () => (await storage(page)).activeProfile === 'p1', 5000, 'переключение в p1');
+    // Смена профиля поиск не запускает: поиск идёт сам и не стоит в ближайшем расписании.
+    await page.waitForTimeout(1500);
+    assert.equal((await page.evaluate(() => chrome.runtime.sendMessage({ type: 'status' }))).running, false, 'после смены профиля поиск не начался');
+    const after = await storage(page);
+    for (const s of after.sources.filter((x) => x.enabled)) {
+      assert.ok(Date.parse(after[`srcstate:${s.id}`]?.nextRunAt || 0) > Date.now() + s.intervalMin * 60e3 * 0.8, `${s.name}: автопоиск не раньше интервала`);
+    }
     await page.evaluate(() => { location.hash = ''; });
     await until(async () => (await page.locator('#appliedTile .mini-title').count()) === 1, 5000, 'отклик первого профиля вернулся');
     assert.equal((await storage(page)).profile.name, 'Иван');
@@ -669,6 +714,53 @@ try {
     assert.ok(Array.isArray(shared.solkJobSources) && shared.solkJobSources.length && shared.solkJobSources.every((x) => x.url && !('id' in x)));
   });
 
+  await step('после выключения компьютера всё сохраняется: браузер закрыт и открыт заново', async () => {
+    const before = await storage(page);
+    const vacs = Object.keys(before).filter((k) => k.startsWith('v:')).length;
+    const marks = Object.keys(before).filter((k) => k.startsWith('u:')).length;
+    assert.ok(vacs > 10 && marks >= 2, `есть что проверять: ${vacs} вакансий, ${marks} отметок`);
+    await context.close();
+    context = await launch();
+    page = context.pages()[0] || await context.newPage();
+    page.on('pageerror', (e) => pageErrors.push(e.message));
+    page.on('dialog', acceptAll);
+    await page.goto(dash);
+    await page.waitForSelector('#appliedTile');
+    const after = await storage(page);
+    for (const k of ['profile', 'profiles', 'sources', 'resume', 'settings', 'tgLink', 'runs']) assert.deepEqual(after[k], before[k], `сохранилось: ${k}`);
+    assert.equal(Object.keys(after).filter((k) => k.startsWith('v:')).length, vacs, 'все найденные вакансии на месте');
+    assert.equal(Object.keys(after).filter((k) => k.startsWith('u:')).length, marks, 'статусы и заметки на месте');
+    await until(async () => (await page.locator('#appliedTile .mini-title').count()) === 1, 5000, '«Мои отклики» на месте');
+    assert.equal(after.settings.retentionDays, 0, 'автоудаление выключено');
+  });
+
+  await step('удаление профиля — только после двух подтверждений', async () => {
+    await page.evaluate(() => { location.hash = 'profile'; });
+    await page.waitForSelector('.drawer.open .profiles-bar select');
+    const second = (await storage(page)).profiles.find((x) => x.id !== 'p1').id;
+    await page.locator('.profiles-bar select').selectOption(second);
+    await until(async () => (await storage(page)).activeProfile === second, 5000, 'переключение во второй профиль');
+    await page.waitForSelector('.profiles-bar button:has-text("Удалить")');
+    let asked = 0;
+    page.off('dialog', acceptAll);
+    const dismissSecond = (dlg) => { asked++; if (asked === 1) dlg.accept(); else dlg.dismiss(); };
+    page.on('dialog', dismissSecond);
+    await page.locator('.profiles-bar button', { hasText: 'Удалить' }).click();
+    await until(() => asked === 2, 3000, 'второе подтверждение');
+    page.off('dialog', dismissSecond);
+    assert.equal((await storage(page)).profiles.length, 2, 'отмена на втором шаге — профиль остался');
+    asked = 0;
+    const acceptCount = (dlg) => { asked++; dlg.accept(); };
+    page.on('dialog', acceptCount);
+    await page.locator('.profiles-bar button', { hasText: 'Удалить' }).click();
+    await until(async () => (await storage(page)).profiles.length === 1, 5000, 'профиль удалён');
+    page.off('dialog', acceptCount);
+    page.on('dialog', acceptAll);
+    assert.equal(asked, 2, 'два подтверждения');
+    assert.equal((await storage(page)).activeProfile, 'p1');
+    await page.keyboard.press('Escape');
+  });
+
   await step('сброс статистики — только после двух подтверждений', async () => {
     await page.evaluate(() => { location.hash = 'search'; });
     await page.waitForSelector('.drawer.open .danger-zone');
@@ -682,7 +774,7 @@ try {
     page.on('dialog', acceptAll);
     assert.equal(asked, 2, 'два подтверждения');
     const st = await storage(page);
-    assert.ok(st.sources.length && st.profiles.length === 2 && st.profile.name === 'Иван', 'источники и профили на месте');
+    assert.ok(st.sources.length && st.profiles.length === 1 && st.profile.name === 'Иван', 'источники и профили на месте');
     assert.ok(!st.runs && !Object.keys(st).some((k) => k.startsWith('u:') || k.startsWith('srcstate:')));
   });
 

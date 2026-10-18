@@ -14,7 +14,7 @@ export function loadConfig(env = process.env) {
     dataDir: env.DATA_DIR || path.join(here, '..', 'data'),
     knowledgeDir: env.KNOWLEDGE_DIR || path.join(here, '..', 'knowledge'),
     readmePath: env.README_PATH || path.join(here, '..', '..', 'README.md'),
-    installUrl: env.INSTALL_URL || 'https://solk-job.ru',
+    installUrl: env.INSTALL_URL || 'https://solkhua.ru',
     humanSupport: env.HUMAN_SUPPORT || 'https://t.me/max_max3700',
     notifyPerHour: Number(env.NOTIFY_PER_HOUR) || 30,
   };

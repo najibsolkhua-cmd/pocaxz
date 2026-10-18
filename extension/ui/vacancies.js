@@ -2,7 +2,7 @@
 
 import * as store from '../lib/store.js';
 import { SKILL_NAMES } from '../lib/parse.js';
-import { h, ago, fmtSalary, daysSince } from './dom.js';
+import { h, fmtTime, fmtDate, fmtSalary, daysSince } from './dom.js';
 
 const GRADE_LABEL = { intern: 'Стажёр', junior: 'Junior', middle: 'Middle', senior: 'Senior', lead: 'Lead' };
 const FORMAT_LABEL = { remote: 'Удалённо', hybrid: 'Гибрид', office: 'Офис' };
@@ -22,7 +22,7 @@ export function vacancyCard(v, s) {
     }, v.note));
 
   const salary = fmtSalary(v.salary);
-  const waiting = v.status === 'applied' ? daysSince(v.statusChangedAt) : null;
+  const waiting = store.WAITING_STATUSES.includes(v.status) ? daysSince(v.statusChangedAt) : null;
 
   return h('article', { class: `vc st-${v.status}`, 'data-key': v.key },
     h('div', { class: `vc-score ${pct >= 65 ? 'hi' : pct >= 45 ? 'mid' : ''}`, title: scoreTitle(s) }, h('b', {}, `${pct}%`), h('small', {}, 'подходит')),
@@ -36,7 +36,10 @@ export function vacancyCard(v, s) {
         s.otherCity ? h('span', { class: 'vc-remote', title: 'Город не из вашего профиля, но работа удалённая' }, `Удалёнка · ${s.otherCity}`) : v.location ? h('span', {}, v.location) : null,
         v.grades?.length ? h('span', {}, v.grades.map((g) => GRADE_LABEL[g]).join('/')) : null,
         v.formats?.length ? h('span', {}, v.formats.map((f) => FORMAT_LABEL[f]).join(', ')) : null,
-        h('span', { class: 'vc-src' }, `${store.PLATFORM_NAMES[v.platform]} · ${ago(v.publishedAt || v.firstSeenAt)}`),
+        // Время — когда вакансию последний раз видел поиск CRM (совпадает с «Последний поиск»),
+        // а не «N ч назад» от даты публикации: сайты часто дают только дату, и часы выходили неверными.
+        h('span', { class: 'vc-src', title: `Впервые найдена: ${fmtTime(v.firstSeenAt)}${v.publishedAt ? ` · опубликована: ${fmtDate(v.publishedAt)}` : ''}` },
+          `${store.PLATFORM_NAMES[v.platform]} · поиск ${fmtTime(v.lastSeenAt || v.firstSeenAt)}${v.publishedAt ? ` · опубл. ${fmtDate(v.publishedAt)}` : ''}`),
         waiting != null ? h('span', { class: `vc-wait ${waiting >= 7 ? 'late' : ''}` }, `ждёт ответа ${waiting} дн`) : null),
       h('div', { class: 'vc-why' }, whyLine(s)),
       (v.snippet || v.description) ? h('p', { class: 'vc-snippet' }, (v.snippet || v.description).slice(0, 360)) : null,
@@ -107,7 +110,8 @@ export function createVacancyList({ platform = null, statuses = null, showStatus
   const hint = statuses ? null : h('details', { class: 'hint-box' },
     h('summary', {}, 'Что значат проценты и статусы?'),
     h('p', {}, '«Подходит мне» — насколько вакансия совпадает с вашим профилем: желаемая должность и её синонимы, навыки, текст резюме и «Чем я занимаюсь», зарплата, грейд и свежесть. Под каждой вакансией написано, из чего сложилась оценка. Ползунок скрывает вакансии ниже выбранного процента — только те, что вы ещё не разбирали.'),
-    h('p', {}, 'Статусы ставите вы сами: «Отправил резюме» — откликнулись, «Отказ» — работодатель ответил отказом, «Скрыто» — вакансия неинтересна. Система их не угадывает. Вакансии, снятые с публикации или ушедшие в архив, исчезают из списка сами.'));
+    h('p', {}, 'Статусы ставите вы сами: «Откликнулся» — нажали «Откликнуться» на сайте, «Отправил резюме» — отправили резюме, «Отказ» — работодатель ответил отказом, «Скрыто» — вакансия неинтересна. Всё, кроме «Не смотрел» и «Просмотрел», попадает в «Мои отклики». Вакансии, снятые с публикации, исчезают из выдачи, но в «Моих откликах» остаются.'),
+    h('p', {}, '«поиск сегодня 18:12» — когда вакансию последний раз видел поиск solk / job; «опубл.» — дата публикации на сайте.'));
 
   const root = h('div', { class: 'vc-wrap' }, showStatusTabs ? tabsEl : null, filters, hint, listEl, h('div', { class: 'center' }, moreBtn));
 
@@ -115,7 +119,7 @@ export function createVacancyList({ platform = null, statuses = null, showStatus
     if (showStatusTabs) {
       const counts = {};
       for (const { v } of data) counts[v.status] = (counts[v.status] || 0) + 1;
-      tabsEl.replaceChildren(...store.STATUSES.map(([k, label]) => h('button', {
+      tabsEl.replaceChildren(...store.STATUSES.filter(([k]) => !statuses || statuses.includes(k)).map(([k, label]) => h('button', {
         type: 'button',
         class: `chip tab st-${k}${st.tab === k ? ' active' : ''}`,
         onclick: () => { st.tab = st.tab === k ? null : k; st.limit = PAGE; draw(); },
@@ -123,11 +127,10 @@ export function createVacancyList({ platform = null, statuses = null, showStatus
     }
     const rows = data.filter(({ v, s }) => {
       if (st.platform && v.platform !== st.platform) return false;
-      if (statuses) {
-        if (!statuses.includes(v.status)) return false;
-      } else if (st.tab) {
+      if (statuses && !statuses.includes(v.status)) return false;
+      if (st.tab) {
         if (v.status !== st.tab) return false;
-      } else {
+      } else if (!statuses) {
         if (st.status === 'active' && ['hidden', 'rejected'].includes(v.status)) return false;
         if (st.status === 'new' && v.status !== 'new') return false;
         // Порог оценки — только для неразобранных: то, с чем вы работаете, видно всегда.
