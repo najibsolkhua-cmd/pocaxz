@@ -36,6 +36,14 @@ test('T-Банк: страница карьеры читается через AP
   assert.equal(withParams.variant, api.bodies.length, 'первый вариант второго адреса');
 });
 
+test('T-Банк: браузер не пускает запрос (защищённый режим) — одна попытка, без перебора вариантов', async () => {
+  const api = siteApiFor(page);
+  let calls = 0;
+  const blocked = async () => { calls++; throw Object.assign(new Error('Failed to fetch'), { blocked: true }); };
+  await assert.rejects(readSiteApi(api, page, blocked), (e) => e.blocked === true);
+  assert.equal(calls, 1);
+});
+
 test('вакансия без ссылки ведёт на страницу списка', () => {
   const it = jobFromObject({ id: 'a3', title: 'Представитель', subtitle: 'Санкт-Петербург' }, page);
   assert.ok(it.url.startsWith('https://www.tbank.ru/career/vacancies/all/saint-petersburg/?searchQuery='));

@@ -88,7 +88,8 @@ export function applyGender(text, gender) {
 const GRADE_TEXT = { intern: 'стажёр', junior: 'junior', middle: 'middle', senior: 'senior', lead: 'lead' };
 const FORMAT_TEXT = { remote: 'удалённо', hybrid: 'гибрид', office: 'офис' };
 const sentence = (s) => {
-  const t = clean(s).replace(/^[-–—•*\s]+/, '');
+  // Хвост «… системами и» (оборванная строка) — без висящего союза.
+  const t = clean(s).replace(/^[-–—•*\s]+/, '').replace(/[\s,]+(и|а|или|но|с|со|в|во|на|для|по|к|от|из)$/i, '');
   if (!t) return '';
   return `${t[0].toUpperCase()}${t.slice(1)}`.replace(/[.!?…]*$/, (end) => end || '.');
 };

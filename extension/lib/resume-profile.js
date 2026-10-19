@@ -101,7 +101,15 @@ function guessAbout(ls) {
   const about = sectionAfter(ls, /^(обо мне|о себе|about me|summary|профессиональные навыки и качества)/i, HEADERS, 30).join('\n');
   if (about.length >= 60) return about.slice(0, 1500);
   // Нет раздела «Обо мне» — собираем содержательные предложения, без ФИО, контактов и полей резюме.
-  const sentences = ls.filter((l) => l.length >= 60 && !/@|\+7|https?:|проживает|гражданство|родил/i.test(l) && !HEADERS.test(l));
+  // Строку, которую PDF перенёс («…платёжными системами и» + «внутренние сервисы»), склеиваем,
+  // иначе короткий хвост отсеется и предложение оборвётся на «и».
+  const joined = [];
+  for (const l of ls) {
+    const prev = joined.at(-1);
+    if (prev && !/[.!?:;]$/.test(prev) && /^[a-zа-яё]/.test(l) && !HEADERS.test(l)) joined[joined.length - 1] = `${prev} ${l}`;
+    else joined.push(l);
+  }
+  const sentences = joined.filter((l) => l.length >= 60 && !/@|\+7|https?:|проживает|гражданство|родил/i.test(l) && !HEADERS.test(l));
   return sentences.join(' ').slice(0, 1000);
 }
 

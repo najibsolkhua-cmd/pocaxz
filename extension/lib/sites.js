@@ -68,7 +68,8 @@ export async function readSiteApi(api, pageUrl, fetchJson, known = null) {
   const all = [...variants.keys()];
   const order = known != null && variants[known] ? [known, ...all.filter((i) => i !== known)] : all;
   for (const i of order) {
-    const json = await fetchJson(variants[i].endpoint, variants[i].body).catch(() => null);
+    // Браузер не пустил запрос к сайту вовсе (CORS, защищённый режим) — другие варианты не помогут.
+    const json = await fetchJson(variants[i].endpoint, variants[i].body).catch((e) => { if (e?.blocked) throw e; return null; });
     const list = api.list(json);
     if (Array.isArray(list) && list.length) {
       const items = list.map((x) => jobFromObject(x, pageUrl)).filter(Boolean);

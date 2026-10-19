@@ -353,11 +353,21 @@ async function fromSiteApi(api, pageUrl) {
   const key = `siteApi:${api.id}`;
   const known = (await chrome.storage.local.get(key))[key];
   const fetchJson = async (endpoint, body) => {
-    const r = await fetch(endpoint, { method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json', accept: 'application/json' }, body: JSON.stringify(body) });
+    let r;
+    try {
+      r = await fetch(endpoint, { method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json', accept: 'application/json' }, body: JSON.stringify(body) });
+    } catch (e) {
+      // «Failed to fetch»: Яндекс Браузер в защищённом режиме не пускает расширение к сайту банка
+      // даже запросом (в «Ошибках» расширения — «blocked by CORS policy»).
+      throw Object.assign(new Error(String(e?.message || e)), { blocked: true });
+    }
     return r.ok ? r.json() : null;
   };
-  const r = await abortable(readSiteApi(api, pageUrl, fetchJson, known)).catch((e) => { if (e instanceof Stopped) throw e; return null; });
-  if (r && r.variant !== known) await chrome.storage.local.set({ [key]: r.variant });
+  const r = await abortable(readSiteApi(api, pageUrl, fetchJson, known)).catch((e) => {
+    if (e instanceof Stopped) throw e;
+    return e?.blocked ? { blocked: true, items: [] } : null;
+  });
+  if (r && !r.blocked && r.variant !== known) await chrome.storage.local.set({ [key]: r.variant });
   return r;
 }
 
@@ -476,6 +486,12 @@ async function runSource(src, settings, quota = settings.scanLimit) {
       const api = pages === 0 && src.platform === 'generic' ? siteApiFor(url, src.cfg) : null;
       if (api && (mode === 'fetch' || !res?.items?.length)) {
         const r = await fromSiteApi(api, url);
+        if (r?.blocked && guarded) {
+          // Сайт закрыт для расширения целиком: скачивать страницу тоже бесполезно — сразу справка.
+          if (handle) { handle.close(); handle = null; currentHandle = null; }
+          guarded = true;
+          break;
+        }
         if (r?.items.length) {
           if (handle) { handle.close(); handle = null; currentHandle = null; }
           res = { items: r.items, total: r.total, nextUrl: null };

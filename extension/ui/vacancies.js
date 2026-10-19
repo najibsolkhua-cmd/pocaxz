@@ -195,10 +195,14 @@ function interviewField(v) {
     const iso = d.toISOString();
     if (iso !== v.interviewAt) { v.interviewAt = iso; store.setUserFields(v.key, { interviewAt: iso }); }
   };
+  // Пока печатаете, ждём паузы: иначе сохранились бы промежуточные «14:03» по пути к «14:30».
+  let timer = null;
+  const later = (e) => { clearTimeout(timer); timer = setTimeout(() => save({ type: 'change', target: e.target }), 1200); };
+  const saveNow = (e) => { clearTimeout(timer); save(e); };
   return h('label', { class: 'vc-iv' }, 'Дата и время интервью',
     h('input', {
       type: 'datetime-local', min: '2000-01-01T00:00', max: '2100-12-31T23:59', value: localInput(v.interviewAt),
-      onchange: save, onblur: save,
+      onchange: later, onblur: saveNow,
       onkeydown: (e) => { if (e.key === 'Enter') { e.preventDefault(); e.target.blur(); } },
     }),
     hint);

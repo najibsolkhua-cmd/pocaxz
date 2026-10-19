@@ -817,9 +817,15 @@ try {
     const dlg = page.locator('dialog.letter-dialog');
     await dlg.locator('.letter-ok', { hasText: 'Письмо скопировано в буфер обмена' }).waitFor();
     const letter = await dlg.locator('textarea').inputValue();
-    assert.ok(letter.includes(`«${title}»`) && letter.includes('Иван') && letter.includes('t.me/ivan'), letter);
-    assert.match(letter, /Я — python backend-разработчик/i, letter);
-    assert.match(letter, /Буду рад рассказать/, 'от лица мужчины');
+    // Если проверка упадёт, окно не должно остаться поверх страницы для следующих шагов.
+    const closeDlg = () => page.evaluate(() => document.querySelector('dialog.letter-dialog')?.close());
+    const check = (ok, what) => { if (!ok) { closeDlg(); assert.fail(`${what}:\n${letter}`); } };
+    check(letter.includes(`«${title.trim().replace(/\s+/g, ' ')}»`), `название вакансии «${title}»`);
+    check(letter.includes('Иван'), 'имя');
+    check(letter.includes('t.me/ivan'), 'контакты');
+    check(/Я — python backend-разработчик/i.test(letter), 'должность');
+    check(!/ и\.$/m.test(letter), 'оборванное предложение');
+    check(/Буду рад рассказать/.test(letter), 'от лица мужчины');
     assert.ok(!/[{}[\]]|\(а\)/.test(letter), 'нет пустых подстановок');
     assert.equal(await page.evaluate(() => window.__copied), letter, 'в буфер обмена ушло это письмо');
     const steps = await dlg.locator('.letter-steps').textContent();
@@ -893,8 +899,12 @@ try {
     await page.keyboard.press('Enter');
     const ivKey = `u${other.slice(1)}`;
     await until(async () => (await storage(page))[ivKey]?.interviewAt === new Date('2027-11-27T14:30').toISOString(), 5000, 'дата интервью сохранена');
-    await page.waitForTimeout(500);
-    assert.equal(await page.locator('#drawerBody .vc.st-interview input[type=datetime-local]').inputValue(), '2027-11-27T14:30', 'после сохранения год на месте');
+    const saved = await until(async () => {
+      const val = await page.locator('#drawerBody .vc.st-interview input[type=datetime-local]').inputValue();
+      return val === '2027-11-27T14:30' && val;
+    }, 4000, 'после сохранения год и время на месте');
+    assert.equal(saved, '2027-11-27T14:30');
+    assert.equal((await storage(page))[ivKey].interviewAt, new Date('2027-11-27T14:30').toISOString(), 'промежуточные значения не перезаписали дату');
     await page.keyboard.press('Escape');
   });
 
