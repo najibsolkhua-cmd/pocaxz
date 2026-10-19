@@ -940,6 +940,28 @@ try {
     await page.keyboard.press('Escape');
   });
 
+  await step('тема: тёмная — фон #2d2d35 под плитками, выбор переживает перезагрузку', async () => {
+    const bg = () => page.evaluate(() => getComputedStyle(document.body).backgroundColor);
+    assert.equal(await bg(), 'rgb(255, 255, 255)', 'по умолчанию светлая');
+    await page.evaluate(() => { location.hash = 'search'; });
+    const sec = page.locator('.drawer.open .dsec', { hasText: 'Тема' }).first();
+    await sec.locator('button', { hasText: 'Тёмная' }).click();
+    await until(async () => (await storage(page)).settings?.theme === 'dark', 5000, 'тема сохранена');
+    assert.equal(await bg(), 'rgb(45, 45, 53)');
+    await page.keyboard.press('Escape');
+    await page.waitForSelector('.drawer.open', { state: 'detached' }).catch(() => {});
+    await page.waitForTimeout(600);
+    if (process.env.SCREENSHOT_DIR) await page.screenshot({ path: path.join(process.env.SCREENSHOT_DIR, 'home-dark.png') });
+    await page.reload();
+    await page.waitForSelector('#mainTile');
+    assert.equal(await bg(), 'rgb(45, 45, 53)', 'после перезагрузки — тёмная');
+    assert.equal(await page.evaluate(() => getComputedStyle(document.querySelector('#mainTile')).backgroundColor) !== 'rgb(45, 45, 53)', true, 'плитки не перекрашены');
+    await page.evaluate(() => { location.hash = 'search'; });
+    await page.locator('.drawer.open .dsec', { hasText: 'Тема' }).first().locator('button', { hasText: 'Светлая' }).click();
+    await until(async () => (await bg()) === 'rgb(255, 255, 255)', 5000, 'снова светлая');
+    await page.keyboard.press('Escape');
+  });
+
   await step('сброс статистики — только после двух подтверждений', async () => {
     await page.evaluate(() => { location.hash = 'search'; });
     await page.waitForSelector('.drawer.open .danger-zone');

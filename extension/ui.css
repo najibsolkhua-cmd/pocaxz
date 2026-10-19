@@ -617,3 +617,6 @@ kbd { display: inline-block; padding: 1px 7px; border: 1px solid var(--line); bo
 a.btn { text-decoration: none; display: inline-flex; align-items: center; }
 /* Раскрытая справка удлиняет строку источника — переключатель и кнопки остаются наверху. */
 .src-row:has(.scan-help[open]) { align-items: start; }
+
+/* Тёмная тема: меняется только фон главной под плитками. */
+html.theme-dark body { background: #2d2d35; }

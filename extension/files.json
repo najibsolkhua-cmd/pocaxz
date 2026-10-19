@@ -46,6 +46,7 @@
  "offscreen.js",
  "popup.html",
  "popup.js",
+ "theme.js",
  "ui.css",
  "ui/ads.js",
  "ui/dom.js",

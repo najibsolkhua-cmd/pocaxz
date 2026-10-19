@@ -36,6 +36,7 @@ async function loadState() {
   state.profiles = all.profiles || [{ id: 'p1', title: 'Профиль 1' }];
   state.activeProfile = all.activeProfile || 'p1';
   state.settings = { ...store.DEFAULT_SETTINGS, ...(all.settings || {}) };
+  applyTheme(state.settings.theme);
   state.sources = all.sources || [];
   state.resume = all.resume || null;
   state.scored = scoreAll(store.vacanciesFrom(all), state.profile, state.resume?.text || '');
@@ -520,6 +521,7 @@ function buildSearchDrawer(body) {
   } });
 
   body.replaceChildren(
+    themeSection(),
     h('section', { class: 'dsec' }, h('h3', {}, 'Как искать'), settingsForm),
     h('section', { class: 'dsec' }, h('h3', {}, 'Все источники'), srcBox),
     scanHelpGuide(),
@@ -603,6 +605,30 @@ function cloudSection() {
 }
 
 // Шаблоны сопроводительных писем для кнопки «Откликнуться».
+// Тема: светлая — как была, тёмная — фон #2d2d35 под плитками. Остальное не меняется.
+function applyTheme(theme) {
+  document.documentElement.classList.toggle('theme-dark', theme === 'dark');
+  try { localStorage.setItem('solk-theme', theme === 'dark' ? 'dark' : 'light'); } catch { /* не страшно */ }
+}
+
+function themeSection() {
+  const seg = h('div', { class: 'seg', role: 'radiogroup', 'aria-label': 'Тема' });
+  const draw = () => seg.replaceChildren(...[['light', 'Светлая'], ['dark', 'Тёмная']].map(([k, label]) => h('button', {
+    type: 'button',
+    class: state.settings.theme === k ? 'on' : '',
+    role: 'radio',
+    'aria-checked': String(state.settings.theme === k),
+    onclick: async () => {
+      state.settings = { ...state.settings, theme: k };
+      applyTheme(k);
+      draw();
+      await store.saveSettings({ ...(await store.getSettings()), theme: k });
+    },
+  }, label)));
+  draw();
+  return h('section', { class: 'dsec' }, h('h3', {}, 'Тема'), seg);
+}
+
 function lettersSection() {
   const L = structuredClone(state.letters);
   let cur = L.templates.find((t) => t.id === L.defaultId) || L.templates[0];
